@@ -21,7 +21,7 @@ public final class SlashCommandRegistry {
         return builder()
                 .add(new SlashCommandSpec("help", "/help", "Show this help", List.of(), false, true))
                 .add(new SlashCommandSpec("new", "/new", "Start a new thread", List.of(), false, false))
-                .add(new SlashCommandSpec("threads", "/threads [all|loaded|archived]", "List threads", List.of(), false, true))
+                .add(new SlashCommandSpec("threads", "/threads [all|loaded|archived] [--search TEXT] [--cwd PATH] [--status STATUS] [--source KIND] [--parent THREAD-ID-PREFIX]", "List threads", List.of(), false, true))
                 .add(new SlashCommandSpec("resume", "/resume <thread-id-prefix>", "Switch to a thread", List.of("use"), true, false))
                 .add(new SlashCommandSpec("fork", "/fork [thread-id-prefix] [title]", "Fork the active or matching thread", List.of(), true, false))
                 .add(new SlashCommandSpec("archive", "/archive [thread-id-prefix]", "Archive a thread", List.of(), true, true))

@@ -16,6 +16,13 @@ class CodexPropertiesTest {
         assertEquals(4, properties.getAgent().getMaxDepth());
         assertEquals(272_000, properties.getModel().getContextWindow());
         assertEquals(200_000, properties.getModel().getAutoCompactTokenLimit());
+        assertEquals(32 * 1024, properties.getPrompt().getProjectDocMaxBytes());
+        assertEquals("", properties.getPrompt().getBaseInstructionsText());
+        assertEquals("", properties.getPrompt().getBaseInstructionsFile());
+        assertEquals("", properties.getPrompt().getProjectInstructionsText());
+        assertEquals("", properties.getPrompt().getProjectInstructionsFile());
+        assertEquals("", properties.getPrompt().getUserInstructionsText());
+        assertEquals("", properties.getPrompt().getUserInstructionsFile());
     }
 
     @Test

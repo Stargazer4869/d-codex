@@ -9,13 +9,19 @@ import org.dean.codex.protocol.conversation.ThreadId;
 import org.dean.codex.protocol.conversation.TurnId;
 import org.dean.codex.protocol.conversation.TurnStatus;
 import org.dean.codex.protocol.conversation.ConversationTurn;
+import org.dean.codex.protocol.context.ReconstructedReplayItem;
 import org.dean.codex.protocol.history.CompactedHistoryItem;
 import org.dean.codex.protocol.history.CompactionStrategy;
 import org.dean.codex.protocol.history.HistoryCompactionSummaryItem;
+import org.dean.codex.protocol.history.HistoryCollabToolCallItem;
 import org.dean.codex.protocol.history.HistoryMessageItem;
 import org.dean.codex.protocol.history.HistoryToolCallItem;
 import org.dean.codex.protocol.history.ThreadHistoryItem;
+import org.dean.codex.protocol.item.CollabDeliveryState;
+import org.dean.codex.protocol.item.CollabToolCallItem;
+import org.dean.codex.protocol.item.CollabToolCallStatus;
 import org.dean.codex.protocol.item.AgentMessageItem;
+import org.dean.codex.protocol.agent.AgentMailboxState;
 import org.dean.codex.protocol.item.ToolCallItem;
 import org.dean.codex.protocol.item.UserMessageItem;
 import org.dean.codex.protocol.context.ReconstructedThreadContext;
@@ -52,9 +58,22 @@ class DefaultThreadContextReconstructionServiceTest {
         TurnId secondTurn = store.startTurn(threadId, "Update docs", base.plusSeconds(5));
         UserMessageItem secondUser = new UserMessageItem(new ItemId("item-4"), "Update docs", base.plusSeconds(6));
         ToolCallItem secondToolCall = new ToolCallItem(new ItemId("item-5"), "READ_FILE", "README.md", base.plusSeconds(7));
+        CollabToolCallItem secondCollab = new CollabToolCallItem(
+                new ItemId("item-5b"),
+                "spawn_agent",
+                CollabToolCallStatus.COMPLETED,
+                CollabDeliveryState.DISPATCHED,
+                threadId,
+                List.of(new ThreadId("thread-agent")),
+                new ThreadId("thread-agent"),
+                "inspect repository",
+                java.util.Map.of("thread-agent", org.dean.codex.protocol.agent.AgentStatus.IDLE),
+                java.util.Map.of("thread-agent", new AgentMailboxState(new ThreadId("thread-agent"), 2L, 0, base.plusSeconds(7))),
+                "mailbox_updated",
+                base.plusSeconds(7));
         AgentMessageItem secondAssistant = new AgentMessageItem(new ItemId("item-6"), "Updated docs", base.plusSeconds(8));
-        store.appendTurnItems(threadId, secondTurn, List.of(secondUser, secondToolCall, secondAssistant));
-        historyStore.append(threadId, ThreadHistoryMapper.map(List.of(secondUser, secondToolCall, secondAssistant)));
+        store.appendTurnItems(threadId, secondTurn, List.of(secondUser, secondToolCall, secondCollab, secondAssistant));
+        historyStore.append(threadId, ThreadHistoryMapper.map(List.of(secondUser, secondToolCall, secondCollab, secondAssistant)));
         store.completeTurn(threadId, secondTurn, TurnStatus.COMPLETED, "Updated docs", base.plusSeconds(9));
 
         TurnId thirdTurn = store.startTurn(threadId, "Run tests", base.plusSeconds(10));
@@ -101,6 +120,12 @@ class DefaultThreadContextReconstructionServiceTest {
                 .anyMatch(activity -> activity.detail().contains("Compacted summary: keep the README change")));
         assertTrue(reconstructed.recentActivities().stream()
                 .anyMatch(activity -> activity.detail().contains("READ_FILE")));
+        assertTrue(reconstructed.replaySummary().stream()
+                .anyMatch(item -> item.kind().equals("collaboration")
+                        && item.detail().contains("spawn_agent")
+                        && item.deliveryState() == CollabDeliveryState.DISPATCHED
+                        && item.mailboxSummary() != null
+                        && item.wakeupCause().equals("mailbox_updated")));
     }
 
     private static final class FixedContextManager implements ContextManager {

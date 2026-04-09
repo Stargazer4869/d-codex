@@ -9,6 +9,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -25,6 +26,13 @@ class ThreadSummaryJsonTest {
                 Instant.parse("2026-04-01T00:01:00Z"),
                 2,
                 "Inspect the transport layer changes",
+                "Inspect the transport layer changes",
+                "workspace-write",
+                "review-sensitive",
+                "1234567890abcdef",
+                "main",
+                "git@github.com:org/repo.git",
+                "1.0-SNAPSHOT",
                 false,
                 "openai",
                 "gpt-5.4",
@@ -41,7 +49,11 @@ class ThreadSummaryJsonTest {
                 new ThreadId("thread-parent"),
                 2,
                 AgentStatus.RUNNING,
-                Instant.parse("2026-04-01T00:03:00Z"));
+                Instant.parse("2026-04-01T00:03:00Z"),
+                new ThreadPromptStateSummary(
+                        Instant.parse("2026-04-01T00:04:00Z"),
+                        new ThreadId("thread-parent"),
+                        2));
 
         String json = objectMapper.writeValueAsString(summary);
         ThreadSummary restored = objectMapper.readValue(json, ThreadSummary.class);
@@ -49,10 +61,20 @@ class ThreadSummaryJsonTest {
         assertEquals(summary, restored);
         assertTrue(restored.loaded());
         assertTrue(restored.archived());
+        assertEquals("Inspect the transport layer changes", restored.firstUserInput());
+        assertEquals("workspace-write", restored.sandboxMode());
+        assertEquals("review-sensitive", restored.approvalMode());
+        assertEquals("1234567890abcdef", restored.gitSha());
+        assertEquals("main", restored.gitBranch());
+        assertEquals("git@github.com:org/repo.git", restored.gitOriginUrl());
+        assertEquals("1.0-SNAPSHOT", restored.cliVersion());
         assertEquals(new ThreadId("thread-parent"), restored.parentThreadId());
         assertEquals(Integer.valueOf(2), restored.agentDepth());
         assertEquals(AgentStatus.RUNNING, restored.agentStatus());
         assertEquals(Instant.parse("2026-04-01T00:03:00Z"), restored.agentClosedAt());
+        assertNotNull(restored.promptState());
+        assertEquals(new ThreadId("thread-parent"), restored.promptState().inheritedFromThreadId());
+        assertEquals(2, restored.promptState().userInstructionSectionCount());
     }
 
     @Test
@@ -64,6 +86,9 @@ class ThreadSummaryJsonTest {
                 Instant.parse("2026-04-01T00:01:00Z"),
                 1,
                 "Legacy preview",
+                null,
+                null,
+                null,
                 false,
                 "openai",
                 "gpt-5.4",
@@ -83,6 +108,13 @@ class ThreadSummaryJsonTest {
         assertNull(legacyConstructed.agentDepth());
         assertNull(legacyConstructed.agentStatus());
         assertNull(legacyConstructed.agentClosedAt());
+        assertNull(legacyConstructed.promptState());
+        assertNull(legacyConstructed.sandboxMode());
+        assertNull(legacyConstructed.approvalMode());
+        assertNull(legacyConstructed.gitSha());
+        assertNull(legacyConstructed.gitBranch());
+        assertNull(legacyConstructed.gitOriginUrl());
+        assertNull(legacyConstructed.cliVersion());
 
         String legacyJson = """
                 {
@@ -97,6 +129,7 @@ class ThreadSummaryJsonTest {
         ThreadSummary restored = objectMapper.readValue(legacyJson, ThreadSummary.class);
 
         assertEquals("Legacy thread", restored.preview());
+        assertNull(restored.firstUserInput());
         assertEquals(ThreadStatus.NOT_LOADED, restored.status());
         assertEquals(ThreadSource.UNKNOWN, restored.source());
         assertTrue(restored.materialized());
@@ -106,5 +139,6 @@ class ThreadSummaryJsonTest {
         assertNull(restored.agentDepth());
         assertNull(restored.agentStatus());
         assertNull(restored.agentClosedAt());
+        assertNull(restored.promptState());
     }
 }

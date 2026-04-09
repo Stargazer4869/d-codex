@@ -37,6 +37,17 @@ class FileSystemConversationStoreTest {
     void persistsThreadsAndTurnsAcrossStoreInstances() {
         ConversationStore firstStore = new FileSystemConversationStore(tempDir);
         ThreadId threadId = firstStore.createThread("Persistent thread");
+        firstStore.updateThreadMetadata(
+                threadId,
+                null,
+                null,
+                null,
+                "workspace-write",
+                "review-sensitive",
+                "1234567890abcdef",
+                "main",
+                "git@github.com:org/repo.git",
+                "1.0-SNAPSHOT");
         Instant startedAt = Instant.parse("2026-03-25T00:00:00Z");
         TurnId turnId = firstStore.startTurn(threadId, "hello", startedAt);
         firstStore.appendTurnItems(threadId, turnId, List.of(new ToolCallItem(
@@ -52,6 +63,13 @@ class FileSystemConversationStoreTest {
         assertEquals("Persistent thread", secondStore.listThreads().get(0).title());
         assertEquals(1, secondStore.listThreads().get(0).turnCount());
         assertEquals("hello", secondStore.listThreads().get(0).preview());
+        assertEquals("hello", secondStore.listThreads().get(0).firstUserInput());
+        assertEquals("workspace-write", secondStore.listThreads().get(0).sandboxMode());
+        assertEquals("review-sensitive", secondStore.listThreads().get(0).approvalMode());
+        assertEquals("1234567890abcdef", secondStore.listThreads().get(0).gitSha());
+        assertEquals("main", secondStore.listThreads().get(0).gitBranch());
+        assertEquals("git@github.com:org/repo.git", secondStore.listThreads().get(0).gitOriginUrl());
+        assertEquals("1.0-SNAPSHOT", secondStore.listThreads().get(0).cliVersion());
         assertEquals(ThreadStatus.NOT_LOADED, secondStore.listThreads().get(0).status());
         assertEquals(ThreadSource.UNKNOWN, secondStore.listThreads().get(0).source());
         assertTrue(secondStore.listThreads().get(0).materialized());
@@ -92,6 +110,7 @@ class FileSystemConversationStoreTest {
 
         assertEquals(threadId, summary.threadId());
         assertEquals("Legacy preview should come from the first message", summary.preview());
+        assertEquals("Legacy preview should come from the first message", summary.firstUserInput());
         assertEquals(ThreadStatus.NOT_LOADED, summary.status());
         assertEquals(ThreadSource.UNKNOWN, summary.source());
         assertTrue(summary.materialized());
@@ -184,6 +203,7 @@ class FileSystemConversationStoreTest {
         ThreadSummary rolledBack = reopenedAgain.rollbackThread(threadId, 2);
         assertEquals(1, rolledBack.turnCount());
         assertEquals("inspect repo", rolledBack.preview());
+        assertEquals("inspect repo", rolledBack.firstUserInput());
 
         ConversationStore reopenedAfterRollback = new FileSystemConversationStore(tempDir);
         ThreadSummary finalSummary = reopenedAfterRollback.listThreads().stream()
@@ -192,6 +212,7 @@ class FileSystemConversationStoreTest {
                 .orElseThrow();
         assertEquals(1, finalSummary.turnCount());
         assertEquals("inspect repo", finalSummary.preview());
+        assertEquals("inspect repo", finalSummary.firstUserInput());
         assertEquals(1, reopenedAfterRollback.turns(threadId).size());
         assertEquals("inspected", reopenedAfterRollback.turns(threadId).get(0).finalAnswer());
     }

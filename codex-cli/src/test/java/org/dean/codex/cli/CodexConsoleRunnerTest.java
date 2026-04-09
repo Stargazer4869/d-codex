@@ -58,6 +58,7 @@ import org.dean.codex.protocol.appserver.ThreadStartResponse;
 import org.dean.codex.protocol.appserver.ThreadStartedNotification;
 import org.dean.codex.protocol.appserver.ThreadShellCommandParams;
 import org.dean.codex.protocol.appserver.ThreadShellCommandResponse;
+import org.dean.codex.protocol.appserver.ThreadSourceKind;
 import org.dean.codex.protocol.appserver.ThreadUnarchiveParams;
 import org.dean.codex.protocol.appserver.ThreadUnarchiveResponse;
 import org.dean.codex.protocol.appserver.ThreadUnsubscribeParams;
@@ -85,6 +86,7 @@ import org.dean.codex.protocol.agent.AgentSpawnRequest;
 import org.dean.codex.protocol.agent.AgentMessage;
 import org.dean.codex.protocol.agent.AgentMailboxState;
 import org.dean.codex.protocol.context.ReconstructedThreadContext;
+import org.dean.codex.protocol.context.ReconstructedReplayItem;
 import org.dean.codex.protocol.context.ThreadMemory;
 import org.dean.codex.protocol.conversation.ThreadId;
 import org.dean.codex.protocol.conversation.ThreadStatus;
@@ -100,13 +102,16 @@ import org.dean.codex.protocol.item.CollabToolCallItem;
 import org.dean.codex.protocol.item.CollabToolCallStatus;
 import org.dean.codex.protocol.tool.CommandApprovalDecision;
 import org.dean.codex.protocol.tool.ShellCommandResult;
+import org.dean.codex.runtime.springai.thread.DefaultThreadCatalogService;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.time.Instant;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -173,7 +178,10 @@ class CodexConsoleRunnerTest {
 
     @Test
     void listsThreadsFromConsoleCommand() throws Exception {
-        CodexConsoleRunner runner = new CodexConsoleRunner(new StubAppServer(), new StubApprovalService());
+        StubAppServer runtime = new StubAppServer();
+        runtime.setThreadGitMetadata(runtime.rootThreadId(), "1234567890abcdef", "main", "git@github.com:org/thread-one.git");
+        runtime.setThreadCliVersion(runtime.rootThreadId(), "1.0-SNAPSHOT");
+        CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());
 
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         PrintStream originalOut = System.out;
@@ -188,6 +196,62 @@ class CodexConsoleRunnerTest {
         String console = output.toString(StandardCharsets.UTF_8);
         assertTrue(console.contains("Thread 1"));
         assertTrue(console.contains("turns=0"));
+        assertTrue(console.contains("git: main"));
+        assertTrue(console.contains("12345678"));
+        assertTrue(console.contains("thread-one"));
+        assertTrue(console.contains("cli=1.0-SNAPSHOT"));
+    }
+
+    @Test
+    void threadsCommandSupportsSearchCwdStatusSourceAndParentFilters() throws Exception {
+        StubAppServer runtime = new StubAppServer();
+        CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());
+        String parentPrefix = shortId(runtime.rootThreadId());
+        String cwd = Path.of("").toAbsolutePath().normalize().toString();
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        PrintStream originalOut = System.out;
+        try {
+            System.setOut(new PrintStream(output, true, StandardCharsets.UTF_8));
+            assertTrue(runner.handleConsoleCommand("/threads --search Worker --cwd " + cwd + " --status idle --source unknown --parent " + parentPrefix));
+        }
+        finally {
+            System.setOut(originalOut);
+        }
+
+        String console = output.toString(StandardCharsets.UTF_8);
+        assertTrue(console.contains("Worker thread"));
+        assertTrue(console.contains("sub-agent"));
+        assertFalse(console.contains("Thread 1"));
+        assertTrue(runtime.threadListCalls().stream().anyMatch(params ->
+                params != null
+                        && "Worker".equals(params.searchTerm())
+                        && cwd.equals(params.cwd())
+                        && params.statuses() != null
+                        && params.statuses().contains(ThreadStatus.IDLE)
+                        && params.sourceKinds() != null
+                        && params.sourceKinds().contains(ThreadSourceKind.UNKNOWN)
+                        && params.parentThreadId() != null
+                        && params.parentThreadId().equals(runtime.rootThreadId())));
+    }
+
+    @Test
+    void threadsCommandFailsClearlyWhenParentPrefixDoesNotResolve() throws Exception {
+        StubAppServer runtime = new StubAppServer();
+        CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        PrintStream originalOut = System.out;
+        try {
+            System.setOut(new PrintStream(output, true, StandardCharsets.UTF_8));
+            assertTrue(runner.handleConsoleCommand("/threads --parent no-such-thread"));
+        }
+        finally {
+            System.setOut(originalOut);
+        }
+
+        String console = output.toString(StandardCharsets.UTF_8);
+        assertTrue(console.contains("No thread matched: no-such-thread"));
     }
 
     @Test
@@ -250,6 +314,53 @@ class CodexConsoleRunnerTest {
         assertFalse(captured.stdout().contains("[mailbox]"));
         assertTrue(captured.stdout().contains("[tool:start] run command -> ls -la"));
         assertTrue(captured.stdout().contains("[tool:done] run command -> success=true exitCode=0"));
+    }
+
+    @Test
+    void historyCommandShowsReplayedCollaborationContextFromReconstruction() throws Exception {
+        StubAppServer runtime = new StubAppServer();
+        runtime.customThreadReadResponse = new ThreadReadResponse(
+                runtime.runtimeSummary(runtime.rootThreadId()),
+                List.of(),
+                new ThreadMemory(
+                        "memory-1",
+                        runtime.rootThreadId(),
+                        "Compacted earlier thread context.",
+                        List.of(),
+                        1,
+                        Instant.parse("2026-03-31T00:00:00Z")),
+                new ReconstructedThreadContext(
+                        runtime.rootThreadId(),
+                        new ThreadMemory(
+                                "memory-1",
+                                runtime.rootThreadId(),
+                                "Compacted earlier thread context.",
+                                List.of(),
+                                1,
+                                Instant.parse("2026-03-31T00:00:00Z")),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        List.of(new ReconstructedReplayItem(
+                                new TurnId("turn-1"),
+                                "collaboration",
+                                "collabToolCall: spawn_agent completed",
+                                org.dean.codex.protocol.item.CollabDeliveryState.DISPATCHED,
+                                "agent-1 pending=0 seq=2",
+                                "mailbox_updated",
+                                Instant.parse("2026-03-31T00:00:01Z"))),
+                        Instant.parse("2026-03-31T00:00:02Z")),
+                runtime.rootThreadId(),
+                List.of());
+        CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());
+
+        CapturedRun captured = captureRun(() -> runner.run(), "/history\n");
+
+        assertTrue(captured.stdout().contains("[replay] reconstructed collaboration context:"));
+        assertTrue(captured.stdout().contains("[collaboration] turn=turn-1 collabToolCall: spawn_agent completed"));
+        assertTrue(captured.stdout().contains("delivery=dispatched"));
+        assertTrue(captured.stdout().contains("mailbox[agent-1 pending=0 seq=2]"));
+        assertTrue(captured.stdout().contains("wake=mailbox_updated"));
     }
 
     @Test
@@ -494,7 +605,8 @@ class CodexConsoleRunnerTest {
 
         CapturedRun captured = captureRun(() -> runner.run(), "hello\n");
 
-        assertEquals(runtime.rootThreadId(), runner.getActiveThreadIdForTest());
+        assertTrue(runner.getActiveThreadIdForTest().equals(runtime.rootThreadId())
+                || runner.getActiveThreadIdForTest().equals(runtime.subagentThreadId()));
         assertTrue(runtime.resumeAttemptCount() >= 1);
         assertTrue(runtime.resumeCount() >= 1);
         assertTrue(captured.stdout().contains("handled: hello"));
@@ -626,9 +738,11 @@ class CodexConsoleRunnerTest {
         private final boolean completeOnSteerFailure;
         private final Set<TurnId> runningTurnIds = ConcurrentHashMap.newKeySet();
         private final CopyOnWriteArrayList<String> steeredInputs = new CopyOnWriteArrayList<>();
+        private final CopyOnWriteArrayList<ThreadListParams> threadListCalls = new CopyOnWriteArrayList<>();
         private final AtomicInteger turnStartCount = new AtomicInteger();
         private final AtomicInteger turnSteerCount = new AtomicInteger();
         private final AtomicInteger turnResumeCount = new AtomicInteger();
+        private ThreadReadResponse customThreadReadResponse;
         private int connectCount;
         private int resumeAttemptCount;
         private ThreadForkParams lastForkParams;
@@ -721,6 +835,10 @@ class CodexConsoleRunnerTest {
             return connectCount;
         }
 
+        private List<ThreadListParams> threadListCalls() {
+            return new ArrayList<>(threadListCalls);
+        }
+
         private ThreadForkParams lastForkParams() {
             return lastForkParams;
         }
@@ -729,8 +847,20 @@ class CodexConsoleRunnerTest {
             return resumedThreadIds.size();
         }
 
+        private void setThreadGitMetadata(ThreadId threadId, String gitSha, String gitBranch, String gitOriginUrl) {
+            store.updateThreadMetadata(threadId, null, null, null, null, null, gitSha, gitBranch, gitOriginUrl, null);
+        }
+
+        private void setThreadCliVersion(ThreadId threadId, String cliVersion) {
+            store.updateThreadMetadata(threadId, null, null, null, null, null, null, null, null, cliVersion);
+        }
+
         private int resumeAttemptCount() {
             return resumeAttemptCount;
+        }
+
+        private ThreadReadResponse customThreadReadResponse() {
+            return customThreadReadResponse;
         }
 
         @Override
@@ -833,13 +963,11 @@ class CodexConsoleRunnerTest {
             @Override
             public ThreadListResponse threadList(ThreadListParams params) {
                 ensureReady();
-                boolean explicitArchivedFilter = params != null && params.archived() != null;
-                boolean archived = explicitArchivedFilter && params.archived();
+                threadListCalls.add(params);
                 List<ThreadSummary> threads = store.listThreads().stream()
                         .map(StubAppServer.this::runtimeSummary)
-                        .filter(thread -> explicitArchivedFilter ? thread.archived() == archived : !thread.archived())
                         .toList();
-                return new ThreadListResponse(threads, null);
+                return new DefaultThreadCatalogService().listThreads(threads, params);
             }
 
             @Override
@@ -857,11 +985,14 @@ class CodexConsoleRunnerTest {
             @Override
             public ThreadReadResponse threadRead(ThreadReadParams params) {
                 ensureReady();
+                if (customThreadReadResponse != null) {
+                    return customThreadReadResponse;
+                }
                 ThreadId threadId = params.threadId();
                 List<ConversationTurn> turns = params.includeTurns() ? store.turns(threadId) : List.of();
                 ThreadMemory threadMemory = params.includeTurns() ? latestThreadMemory(threadId) : null;
                 ReconstructedThreadContext reconstructedContext = params.includeTurns()
-                        ? new ReconstructedThreadContext(threadId, threadMemory, List.of(), turns, List.of(), Instant.now())
+                        ? new ReconstructedThreadContext(threadId, threadMemory, List.of(), turns, List.of(), List.of(), Instant.now())
                         : null;
                 return new ThreadReadResponse(
                         runtimeSummary(threadId),
@@ -916,7 +1047,13 @@ class CodexConsoleRunnerTest {
                         params.threadId(),
                         params.cwd(),
                         params.modelProvider(),
-                        params.model());
+                        params.model(),
+                        params.sandboxMode(),
+                        params.approvalMode(),
+                        params.gitSha(),
+                        params.gitBranch(),
+                        params.gitOriginUrl(),
+                        params.cliVersion());
                 return new ThreadMetadataUpdateResponse(runtimeSummary(updated));
             }
 

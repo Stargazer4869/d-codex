@@ -95,6 +95,7 @@ The Java app-server/runtime already supports:
 - `threadUnsubscribe`, `threadNameSet`, `threadMetadataUpdate`, and the first thread-scoped runtime service slice via `threadShellCommand`
 - `threadBackgroundTerminalsClean` as the explicit cleanup path for thread-owned background process state
 - persisted thread summaries with title, model, cwd/path, archive state, and agent lineage
+- persisted thread summaries now also retain the first user input as a durable preview source, plus launch policy fields such as sandbox and approval mode when they are known at thread creation or fork time
 - thread tree navigation and related-thread reads
 
 Reference points:
@@ -108,6 +109,7 @@ Reference points:
 The gap is no longer "can we persist sessions?" It is that our threads are still less operationally complete than Codex threads:
 
 - `thread/unsubscribe`, `thread/name/set`, and minimal `thread/metadata/update` now exist, but the semantics are still smaller than Codex's full connection-scoped and metadata-rich model
+- persisted git metadata now exists on threads (`gitSha`, `gitBranch`, `gitOriginUrl`), and `thread/metadata/update` can patch it cleanly
 - `thread/unsubscribe` is now closer to connection-scoped behavior, but it still needs richer loaded-thread lifecycle and notification parity to feel like Codex
 - `thread/resume` now behaves more like a reattachment point, but loaded-thread/session attachment semantics are still simpler than Codex's
 - loaded/not-loaded lifecycle semantics are still weaker than Codex's
@@ -206,6 +208,9 @@ Approval-aware execution exists, but the user workflow still needs to feel more 
 ### 8. Context reconstruction and compaction
 
 Prompt construction should keep moving out of the agent and into reusable runtime services, with compaction and replay getting closer to Codex-style behavior over time.
+The reconstructed thread model should also carry a first-class replay summary for collaboration and compaction, so resumed/history views do not depend on CLI-only formatting to tell the stored thread story. That summary now also appears on the app-server `thread/read` response model, so non-CLI clients can consume the same structured replay story directly.
+`thread/resume` now follows the same pattern, carrying the replay summary too, so resume and read consumers see the same structured delegation/history story.
+`thread/rollback` now also carries the same replay summary, so rollback views preserve the stored collaboration story without exposing delegated content.
 
 ## How To Use This Roadmap
 

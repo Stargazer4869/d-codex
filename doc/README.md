@@ -11,5 +11,7 @@ This directory holds the working design and architecture documents for the Java 
 - [`design/thread-subagent-parity.md`](/Users/chenzhu/Git/play-with-ai/doc/design/thread-subagent-parity.md) - tracker for thread lifecycle and sub-agent parity work
 - [`design/natural-language-sub-agent-delegation.md`](/Users/chenzhu/Git/play-with-ai/doc/design/natural-language-sub-agent-delegation.md) - design for natural-language delegation into sub-agents and collaboration-item parity
 - [`design/cli-command-parity.md`](/Users/chenzhu/Git/play-with-ai/doc/design/cli-command-parity.md) - tracker for top-level CLI parsing and interactive slash-command parity work
+- [`design/prompt-layering-parity.md`](/Users/chenzhu/Git/play-with-ai/doc/design/prompt-layering-parity.md) - design for splitting the Java planner prompt into base instructions, developer/tool guidance, and dynamic turn context
+- [`design/thread-metadata-and-realtime-parity.md`](/Users/chenzhu/Git/play-with-ai/doc/design/thread-metadata-and-realtime-parity.md) - design for the next thread-management phase: richer metadata/index parity and stronger realtime thread-runtime behavior
 - [`architecture/module-map.md`](/Users/chenzhu/Git/play-with-ai/doc/architecture/module-map.md) - module responsibilities and dependency direction
 - [`adr/README.md`](/Users/chenzhu/Git/play-with-ai/doc/adr/README.md) - placeholder for future architecture decision records

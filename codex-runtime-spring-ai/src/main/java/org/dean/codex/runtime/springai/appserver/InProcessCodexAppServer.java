@@ -28,6 +28,7 @@ import org.dean.codex.protocol.appserver.AgentSpawnResponse;
 import org.dean.codex.protocol.appserver.AgentWaitParams;
 import org.dean.codex.protocol.appserver.AgentWaitResponse;
 import org.dean.codex.protocol.appserver.AppServerNotification;
+import org.dean.codex.protocol.appserver.BackgroundTerminalSummary;
 import org.dean.codex.protocol.appserver.InitializeParams;
 import org.dean.codex.protocol.appserver.InitializeResponse;
 import org.dean.codex.protocol.appserver.InitializedNotification;
@@ -90,6 +91,9 @@ import org.dean.codex.protocol.conversation.ThreadId;
 import org.dean.codex.protocol.conversation.ThreadSummary;
 import org.dean.codex.protocol.runtime.RuntimeNotification;
 import org.dean.codex.protocol.runtime.RuntimeNotificationType;
+import org.dean.codex.protocol.context.ReconstructedThreadContext;
+import org.dean.codex.runtime.springai.thread.DefaultThreadCatalogService;
+import org.dean.codex.runtime.springai.thread.ThreadCatalogService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -110,15 +114,24 @@ public class InProcessCodexAppServer implements CodexAppServer {
 
     private final CodexRuntimeGateway runtimeGateway;
     private final ShellCommandTool shellCommandTool;
+    private final ThreadCatalogService threadCatalogService;
+    private final Map<ThreadId, List<BackgroundTerminalHandle>> backgroundTerminals = new ConcurrentHashMap<>();
 
     @Autowired
-    public InProcessCodexAppServer(CodexRuntimeGateway runtimeGateway, ShellCommandTool shellCommandTool) {
+    public InProcessCodexAppServer(CodexRuntimeGateway runtimeGateway,
+                                   ShellCommandTool shellCommandTool,
+                                   ThreadCatalogService threadCatalogService) {
         this.runtimeGateway = runtimeGateway;
         this.shellCommandTool = shellCommandTool;
+        this.threadCatalogService = threadCatalogService == null ? new DefaultThreadCatalogService() : threadCatalogService;
     }
 
     public InProcessCodexAppServer(CodexRuntimeGateway runtimeGateway) {
-        this(runtimeGateway, null);
+        this(runtimeGateway, null, new DefaultThreadCatalogService());
+    }
+
+    public InProcessCodexAppServer(CodexRuntimeGateway runtimeGateway, ShellCommandTool shellCommandTool) {
+        this(runtimeGateway, shellCommandTool, new DefaultThreadCatalogService());
     }
 
     @Override
@@ -130,8 +143,8 @@ public class InProcessCodexAppServer implements CodexAppServer {
 
         private final CopyOnWriteArrayList<Consumer<AppServerNotification>> subscribers = new CopyOnWriteArrayList<>();
         private final Map<ThreadId, AutoCloseable> runtimeSubscriptions = new ConcurrentHashMap<>();
-        private final Map<ThreadId, List<BackgroundTerminalHandle>> backgroundTerminals = new ConcurrentHashMap<>();
         private final Set<String> optOutNotificationMethods = new HashSet<>();
+        private String clientVersion;
         private boolean initializeCalled;
         private boolean initializedAcknowledged;
 
@@ -142,6 +155,7 @@ public class InProcessCodexAppServer implements CodexAppServer {
             }
             initializeCalled = true;
             optOutNotificationMethods.clear();
+            clientVersion = params == null || params.clientInfo() == null ? null : normalizeClientVersion(params.clientInfo().version());
             if (params != null && params.capabilities() != null) {
                 optOutNotificationMethods.addAll(params.capabilities().optOutNotificationMethods());
             }
@@ -164,6 +178,21 @@ public class InProcessCodexAppServer implements CodexAppServer {
         public ThreadStartResponse threadStart(ThreadStartParams params) {
             ensureReady();
             ThreadSummary thread = runtimeGateway.threadStart(params == null ? "" : params.title());
+            String cliVersion = currentClientVersion();
+            if (params != null && (params.sandboxMode() != null || params.approvalMode() != null || cliVersion != null)) {
+                thread = applyMetadataUpdate(
+                        thread,
+                        thread.threadId(),
+                        null,
+                        null,
+                        null,
+                        params.sandboxMode(),
+                        params.approvalMode(),
+                        null,
+                        null,
+                        null,
+                        cliVersion);
+            }
             ensureRuntimeSubscriptions(List.of(thread.threadId()));
             publish(new ThreadStartedNotification(thread));
             return new ThreadStartResponse(thread);
@@ -175,17 +204,22 @@ public class InProcessCodexAppServer implements CodexAppServer {
             ThreadId threadId = requireThreadId(params);
             boolean alreadyLoaded = runtimeGateway.loadedThreads().contains(threadId);
             ThreadSummary thread = runtimeGateway.threadResume(threadId);
+            String cliVersion = currentClientVersion();
+            if (cliVersion != null) {
+                thread = applyMetadataUpdate(thread, thread.threadId(), null, null, null, null, null, null, null, null, cliVersion);
+            }
+            ReconstructedThreadContext reconstructedContext = runtimeGateway.reconstructThreadContext(threadId);
             ensureRuntimeSubscriptions(loadedRelatedThreadIds(thread.threadId()));
             if (!alreadyLoaded) {
                 publish(new ThreadStatusChangedNotification(thread));
             }
-            return new ThreadResumeResponse(thread);
+            return new ThreadResumeResponse(thread, reconstructedContext.replaySummary(), activeBackgroundTerminals(threadId));
         }
 
         @Override
         public ThreadListResponse threadList(ThreadListParams params) {
             ensureReady();
-            return paginateThreads(filterThreads(runtimeGateway.listThreads(), params), params);
+            return threadCatalogService.listThreads(runtimeGateway.listThreads(), params);
         }
 
         @Override
@@ -214,11 +248,16 @@ public class InProcessCodexAppServer implements CodexAppServer {
                     .map(ThreadSummary::threadId)
                     .toList());
             boolean includeTurns = params != null && params.includeTurns();
+            ReconstructedThreadContext reconstructedContext = includeTurns
+                    ? runtimeGateway.reconstructThreadContext(threadId)
+                    : null;
             return new ThreadReadResponse(
                     thread,
                     includeTurns ? runtimeGateway.turns(threadId) : List.of(),
                     includeTurns ? runtimeGateway.latestThreadMemory(threadId).orElse(null) : null,
-                    includeTurns ? runtimeGateway.reconstructThreadContext(threadId) : null,
+                    reconstructedContext,
+                    reconstructedContext == null ? List.of() : reconstructedContext.replaySummary(),
+                    activeBackgroundTerminals(threadId),
                     runtimeGateway.threadTreeRoot(threadId),
                     threadTree.stream()
                             .filter(summary -> !summary.threadId().equals(threadId))
@@ -232,6 +271,10 @@ public class InProcessCodexAppServer implements CodexAppServer {
                 throw new IllegalArgumentException("threadId is required");
             }
             ThreadSummary thread = runtimeGateway.threadFork(params);
+            String cliVersion = currentClientVersion();
+            if (cliVersion != null) {
+                thread = applyMetadataUpdate(thread, thread.threadId(), null, null, null, null, null, null, null, null, cliVersion);
+            }
             ensureRuntimeSubscriptions(List.of(thread.threadId()));
             publish(new ThreadStartedNotification(thread));
             return new ThreadForkResponse(thread);
@@ -257,7 +300,8 @@ public class InProcessCodexAppServer implements CodexAppServer {
                 throw new IllegalArgumentException("numTurns must be >= 1");
             }
             ThreadSummary thread = runtimeGateway.threadRollback(threadId, params.numTurns());
-            return new ThreadRollbackResponse(thread, runtimeGateway.turns(threadId));
+            ReconstructedThreadContext reconstructedContext = runtimeGateway.reconstructThreadContext(threadId);
+            return new ThreadRollbackResponse(thread, runtimeGateway.turns(threadId), reconstructedContext.replaySummary());
         }
 
         @Override
@@ -307,9 +351,53 @@ public class InProcessCodexAppServer implements CodexAppServer {
         public ThreadMetadataUpdateResponse threadMetadataUpdate(ThreadMetadataUpdateParams params) {
             ensureReady();
             ThreadId threadId = requireThreadId(params);
-            ThreadSummary updated = runtimeGateway.updateThreadMetadata(threadId, params.cwd(), params.modelProvider(), params.model());
+            String cliVersion = params.cliVersion() == null ? currentClientVersion() : params.cliVersion();
+            ThreadSummary current = runtimeGateway.listThreads().stream()
+                    .filter(thread -> thread.threadId().equals(threadId))
+                    .findFirst()
+                    .orElse(null);
+            ThreadSummary updated = applyMetadataUpdate(
+                    current,
+                    threadId,
+                    params.cwd(),
+                    params.modelProvider(),
+                    params.model(),
+                    params.sandboxMode(),
+                    params.approvalMode(),
+                    params.gitSha(),
+                    params.gitBranch(),
+                    params.gitOriginUrl(),
+                    cliVersion);
             publish(new ThreadMetadataUpdatedNotification(updated));
             return new ThreadMetadataUpdateResponse(updated);
+        }
+
+        private ThreadSummary applyMetadataUpdate(ThreadSummary current,
+                                                 ThreadId threadId,
+                                                 String cwd,
+                                                 String modelProvider,
+                                                 String model,
+                                                 String sandboxMode,
+                                                 String approvalMode,
+                                                 String gitSha,
+                                                 String gitBranch,
+                                                 String gitOriginUrl,
+                                                 String cliVersion) {
+            ThreadSummary updated = runtimeGateway.updateThreadMetadata(
+                    threadId,
+                    cwd,
+                    modelProvider,
+                    model,
+                    sandboxMode,
+                    approvalMode,
+                    gitSha,
+                    gitBranch,
+                    gitOriginUrl,
+                    cliVersion);
+            if (updated.promptState() == null && current != null && current.promptState() != null) {
+                return updated.withPromptState(current.promptState());
+            }
+            return updated;
         }
 
         @Override
@@ -319,8 +407,8 @@ public class InProcessCodexAppServer implements CodexAppServer {
             requireLoadedThread(threadId);
             String command = params == null ? null : params.command();
             if (isBackgroundCommand(command)) {
-                ShellCommandResult result = launchBackgroundTerminal(threadId, command);
-                return new ThreadShellCommandResponse(result);
+                BackgroundTerminalHandle handle = launchBackgroundTerminal(threadId, command);
+                return new ThreadShellCommandResponse(handle.result(), handle.summary());
             }
             if (shellCommandTool == null) {
                 throw new IllegalStateException("Thread shell command service is not configured");
@@ -548,10 +636,10 @@ public class InProcessCodexAppServer implements CodexAppServer {
             return trimmed.endsWith("&") && !trimmed.endsWith("&&");
         }
 
-        private ShellCommandResult launchBackgroundTerminal(ThreadId threadId, String command) {
+        private BackgroundTerminalHandle launchBackgroundTerminal(ThreadId threadId, String command) {
             String actualCommand = normalizeBackgroundCommand(command);
             if (actualCommand.isBlank()) {
-                return new ShellCommandResult(
+                return new BackgroundTerminalHandle(null, 0L, command == null ? "" : command, threadWorkspace(threadId), Instant.now(), new ShellCommandResult(
                         false,
                         command == null ? "" : command,
                         -1,
@@ -562,7 +650,7 @@ public class InProcessCodexAppServer implements CodexAppServer {
                         false,
                         org.dean.codex.protocol.tool.CommandApprovalDecision.BLOCK,
                         "Command must not be blank.",
-                        "Command must not be blank.");
+                        "Command must not be blank."));
             }
 
             Process process;
@@ -572,7 +660,7 @@ public class InProcessCodexAppServer implements CodexAppServer {
                         .start();
             }
             catch (Exception exception) {
-                return new ShellCommandResult(
+                return new BackgroundTerminalHandle(null, 0L, command, threadWorkspace(threadId), Instant.now(), new ShellCommandResult(
                         false,
                         command,
                         -1,
@@ -583,7 +671,7 @@ public class InProcessCodexAppServer implements CodexAppServer {
                         false,
                         org.dean.codex.protocol.tool.CommandApprovalDecision.ALLOW,
                         "Background terminal launch requested.",
-                        exception.getMessage());
+                        exception.getMessage()));
             }
 
             String stdout;
@@ -594,7 +682,7 @@ public class InProcessCodexAppServer implements CodexAppServer {
                 stderr = finished ? readProcessOutput(process.getErrorStream()) : "";
                 if (!finished) {
                     process.destroyForcibly();
-                    return new ShellCommandResult(
+                    return new BackgroundTerminalHandle(null, 0L, command, threadWorkspace(threadId), Instant.now(), new ShellCommandResult(
                             false,
                             command,
                             -1,
@@ -605,12 +693,12 @@ public class InProcessCodexAppServer implements CodexAppServer {
                             false,
                             org.dean.codex.protocol.tool.CommandApprovalDecision.ALLOW,
                             "Background terminal launch requested.",
-                            "Background terminal launcher did not exit cleanly.");
+                            "Background terminal launcher did not exit cleanly."));
                 }
             }
             catch (Exception exception) {
                 process.destroyForcibly();
-                return new ShellCommandResult(
+                return new BackgroundTerminalHandle(null, 0L, command, threadWorkspace(threadId), Instant.now(), new ShellCommandResult(
                         false,
                         command,
                         -1,
@@ -621,12 +709,12 @@ public class InProcessCodexAppServer implements CodexAppServer {
                         false,
                         org.dean.codex.protocol.tool.CommandApprovalDecision.ALLOW,
                         "Background terminal launch requested.",
-                        exception.getMessage());
+                        exception.getMessage()));
             }
 
             long pid = parseBackgroundPid(stdout);
             if (pid < 1) {
-                return new ShellCommandResult(
+                return new BackgroundTerminalHandle(null, 0L, command, threadWorkspace(threadId), Instant.now(), new ShellCommandResult(
                         false,
                         command,
                         -1,
@@ -637,12 +725,16 @@ public class InProcessCodexAppServer implements CodexAppServer {
                         false,
                         org.dean.codex.protocol.tool.CommandApprovalDecision.ALLOW,
                         "Background terminal launch requested.",
-                        "Unable to determine background process id.");
+                        "Unable to determine background process id."));
             }
 
-            backgroundTerminals.computeIfAbsent(threadId, ignored -> new CopyOnWriteArrayList<>())
-                    .add(new BackgroundTerminalHandle(pid, command, threadWorkspace(threadId), Instant.now()));
-            return new ShellCommandResult(
+            BackgroundTerminalHandle handle = new BackgroundTerminalHandle(
+                    UUID.randomUUID().toString(),
+                    pid,
+                    command,
+                    threadWorkspace(threadId),
+                    Instant.now(),
+                    new ShellCommandResult(
                     true,
                     command,
                     0,
@@ -653,7 +745,9 @@ public class InProcessCodexAppServer implements CodexAppServer {
                     true,
                     org.dean.codex.protocol.tool.CommandApprovalDecision.ALLOW,
                     "Background terminal launch requested.",
-                    "");
+                    ""));
+            backgroundTerminals.computeIfAbsent(threadId, ignored -> new CopyOnWriteArrayList<>()).add(handle);
+            return handle;
         }
 
         private boolean terminateBackgroundTerminal(BackgroundTerminalHandle handle) {
@@ -672,6 +766,36 @@ public class InProcessCodexAppServer implements CodexAppServer {
                 }
             });
             return true;
+        }
+
+        private List<BackgroundTerminalSummary> activeBackgroundTerminals(ThreadId threadId) {
+            if (threadId == null) {
+                return List.of();
+            }
+            List<BackgroundTerminalHandle> handles = backgroundTerminals.get(threadId);
+            if (handles == null || handles.isEmpty()) {
+                return List.of();
+            }
+            List<BackgroundTerminalHandle> activeHandles = handles.stream()
+                    .filter(this::isBackgroundTerminalAlive)
+                    .toList();
+            if (activeHandles.size() != handles.size()) {
+                if (activeHandles.isEmpty()) {
+                    backgroundTerminals.remove(threadId, handles);
+                }
+                else {
+                    backgroundTerminals.put(threadId, new CopyOnWriteArrayList<>(activeHandles));
+                }
+            }
+            return activeHandles.stream()
+                    .map(BackgroundTerminalHandle::summary)
+                    .toList();
+        }
+
+        private boolean isBackgroundTerminalAlive(BackgroundTerminalHandle handle) {
+            return handle != null
+                    && handle.pid() > 0
+                    && ProcessHandle.of(handle.pid()).map(ProcessHandle::isAlive).orElse(false);
         }
 
         private String threadWorkspace(ThreadId threadId) {
@@ -756,54 +880,16 @@ public class InProcessCodexAppServer implements CodexAppServer {
             return params.clientInfo().name().trim();
         }
 
-        private ThreadListResponse paginateThreads(List<ThreadSummary> threads, ThreadListParams params) {
-            int offset = decodeCursor(params == null ? null : params.cursor());
-            int limit = normalizeLimit(params == null ? null : params.limit(), threads.size());
-            int start = Math.min(offset, threads.size());
-            int endExclusive = Math.min(start + limit, threads.size());
-            List<ThreadSummary> page = threads.subList(start, endExclusive);
-            String nextCursor = endExclusive < threads.size() ? Integer.toString(endExclusive) : null;
-            return new ThreadListResponse(page, nextCursor);
+        private String currentClientVersion() {
+            return clientVersion;
         }
 
-        private List<ThreadSummary> filterThreads(List<ThreadSummary> threads, ThreadListParams params) {
-            java.util.stream.Stream<ThreadSummary> stream = threads.stream();
-            if (params != null && params.modelProviders() != null && !params.modelProviders().isEmpty()) {
-                Set<String> providers = Set.copyOf(params.modelProviders());
-                stream = stream.filter(thread -> thread.modelProvider() != null && providers.contains(thread.modelProvider()));
+        private String normalizeClientVersion(String version) {
+            if (version == null) {
+                return null;
             }
-            if (params != null && params.sourceKinds() != null && !params.sourceKinds().isEmpty()) {
-                Set<ThreadSourceKind> sourceKinds = Set.copyOf(params.sourceKinds());
-                stream = stream.filter(thread -> sourceKinds.contains(toSourceKind(thread)));
-            }
-            boolean explicitArchivedFilter = params != null && params.archived() != null;
-            boolean archivedOnly = explicitArchivedFilter && params.archived();
-            stream = stream.filter(thread -> explicitArchivedFilter ? archivedOnly == thread.archived() : !thread.archived());
-            if (params != null && params.cwd() != null && !params.cwd().isBlank()) {
-                stream = stream.filter(thread -> params.cwd().equals(thread.cwd()));
-            }
-            if (params != null && params.searchTerm() != null && !params.searchTerm().isBlank()) {
-                String needle = params.searchTerm().toLowerCase();
-                stream = stream.filter(thread -> {
-                    String title = thread.title() == null ? "" : thread.title().toLowerCase();
-                    String preview = thread.preview() == null ? "" : thread.preview().toLowerCase();
-                    return title.contains(needle) || preview.contains(needle);
-                });
-            }
-            java.util.Comparator<ThreadSummary> comparator = ((params == null ? null : params.sortKey()) == ThreadSortKey.CREATED_AT)
-                    ? java.util.Comparator.comparing(ThreadSummary::createdAt).reversed()
-                    : java.util.Comparator.comparing(ThreadSummary::updatedAt).reversed();
-            return stream.sorted(comparator).toList();
-        }
-
-        private ThreadSourceKind toSourceKind(ThreadSummary thread) {
-            return switch (thread.source()) {
-                case CLI -> ThreadSourceKind.CLI;
-                case APP_SERVER -> ThreadSourceKind.APP_SERVER;
-                case EXEC -> ThreadSourceKind.EXEC;
-                case SUB_AGENT -> ThreadSourceKind.SUB_AGENT;
-                case UNKNOWN -> ThreadSourceKind.UNKNOWN;
-            };
+            String normalized = version.trim();
+            return normalized.isEmpty() ? null : normalized;
         }
 
         private int decodeCursor(String cursor) {
@@ -843,7 +929,19 @@ public class InProcessCodexAppServer implements CodexAppServer {
         }
     }
 
-    private record BackgroundTerminalHandle(long pid, String command, String workingDirectory, Instant startedAt) {
+        private record BackgroundTerminalHandle(String terminalId,
+                                            long pid,
+                                            String command,
+                                            String workingDirectory,
+                                            Instant startedAt,
+                                            ShellCommandResult result) {
+
+        private BackgroundTerminalSummary summary() {
+            if (terminalId == null || pid < 1) {
+                return null;
+            }
+            return new BackgroundTerminalSummary(terminalId, pid, command, workingDirectory, startedAt);
+        }
     }
 
     private ThreadId requireThreadId(ThreadResumeParams params) {

@@ -62,6 +62,28 @@ public interface CodexRuntimeGateway {
                                                String cwd,
                                                String modelProvider,
                                                String model) {
+        return updateThreadMetadata(threadId, cwd, modelProvider, model, null, null);
+    }
+
+    default ThreadSummary updateThreadMetadata(ThreadId threadId,
+                                               String cwd,
+                                               String modelProvider,
+                                               String model,
+                                               String sandboxMode,
+                                               String approvalMode) {
+        return updateThreadMetadata(threadId, cwd, modelProvider, model, sandboxMode, approvalMode, null, null, null, null);
+    }
+
+    default ThreadSummary updateThreadMetadata(ThreadId threadId,
+                                               String cwd,
+                                               String modelProvider,
+                                               String model,
+                                               String sandboxMode,
+                                               String approvalMode,
+                                               String gitSha,
+                                               String gitBranch,
+                                               String gitOriginUrl,
+                                               String cliVersion) {
         throw new UnsupportedOperationException("thread/metadata/update is not implemented yet");
     }
 

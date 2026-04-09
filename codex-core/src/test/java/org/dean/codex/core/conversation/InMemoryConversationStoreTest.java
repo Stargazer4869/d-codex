@@ -24,6 +24,17 @@ class InMemoryConversationStoreTest {
         ConversationStore store = new InMemoryConversationStore();
 
         ThreadId threadId = store.createThread("Example thread");
+        store.updateThreadMetadata(
+                threadId,
+                null,
+                null,
+                null,
+                "workspace-write",
+                "review-sensitive",
+                "1234567890abcdef",
+                "main",
+                "git@github.com:org/repo.git",
+                "1.0-SNAPSHOT");
         Instant startedAt = Instant.parse("2026-03-25T00:00:00Z");
         TurnId turnId = store.startTurn(threadId, "hello", startedAt);
         store.appendTurnItems(threadId, turnId, List.of(new ToolCallItem(
@@ -37,6 +48,13 @@ class InMemoryConversationStoreTest {
         assertEquals(2, store.messages(threadId).size());
         assertEquals("Example thread", store.listThreads().get(0).title());
         assertEquals(1, store.listThreads().get(0).turnCount());
+        assertEquals("hello", store.listThreads().get(0).firstUserInput());
+        assertEquals("workspace-write", store.listThreads().get(0).sandboxMode());
+        assertEquals("review-sensitive", store.listThreads().get(0).approvalMode());
+        assertEquals("1234567890abcdef", store.listThreads().get(0).gitSha());
+        assertEquals("main", store.listThreads().get(0).gitBranch());
+        assertEquals("git@github.com:org/repo.git", store.listThreads().get(0).gitOriginUrl());
+        assertEquals("1.0-SNAPSHOT", store.listThreads().get(0).cliVersion());
         ConversationTurn turn = store.turns(threadId).get(0);
         assertEquals("hello", turn.userInput());
         assertEquals("done", turn.finalAnswer());
@@ -64,6 +82,7 @@ class InMemoryConversationStoreTest {
         ThreadSummary rolledBack = store.rollbackThread(threadId, 1);
         assertEquals(1, rolledBack.turnCount());
         assertEquals("inspect repo", rolledBack.preview());
+        assertEquals("inspect repo", rolledBack.firstUserInput());
         assertEquals(1, store.turns(threadId).size());
         assertEquals("inspected", store.turn(threadId, firstTurn).finalAnswer());
     }

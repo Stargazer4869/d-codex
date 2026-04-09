@@ -11,12 +11,27 @@ public record ThreadForkParams(ThreadId threadId,
                                String cwd,
                                String modelProvider,
                                String model,
+                               String sandboxMode,
+                               String approvalMode,
                                ThreadSource source,
                                String agentNickname,
                                String agentRole,
                                String agentPath) {
 
     public ThreadForkParams(ThreadId threadId) {
-        this(threadId, null, null, null, null, null, null, null, null, null);
+        this(threadId, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    public ThreadForkParams(ThreadId threadId,
+                            String title,
+                            Boolean ephemeral,
+                            String cwd,
+                            String modelProvider,
+                            String model,
+                            ThreadSource source,
+                            String agentNickname,
+                            String agentRole,
+                            String agentPath) {
+        this(threadId, title, ephemeral, cwd, modelProvider, model, null, null, source, agentNickname, agentRole, agentPath);
     }
 }

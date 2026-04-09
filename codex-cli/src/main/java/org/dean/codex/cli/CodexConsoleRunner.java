@@ -20,6 +20,8 @@ import org.dean.codex.cli.command.session.ForkSessionCommand;
 import org.dean.codex.cli.command.session.ResumeSessionCommand;
 import org.dean.codex.cli.config.CliConfigOverrides;
 import org.dean.codex.cli.config.CliConfigOverridesMapper;
+import org.dean.codex.cli.config.CliApprovalMode;
+import org.dean.codex.cli.config.CliSandboxMode;
 import org.dean.codex.cli.interactive.SlashCommandParseResult;
 import org.dean.codex.cli.interactive.SlashCommandParser;
 import org.dean.codex.cli.interactive.SlashCommandRegistry;
@@ -51,6 +53,8 @@ import org.dean.codex.protocol.appserver.ThreadStartParams;
 import org.dean.codex.protocol.appserver.ThreadNameUpdatedNotification;
 import org.dean.codex.protocol.appserver.ThreadStatusChangedNotification;
 import org.dean.codex.protocol.appserver.ThreadUnarchiveParams;
+import org.dean.codex.protocol.context.ReconstructedThreadContext;
+import org.dean.codex.protocol.context.ReconstructedReplayItem;
 import org.dean.codex.protocol.context.ThreadMemory;
 import org.dean.codex.protocol.appserver.TurnCompletedNotification;
 import org.dean.codex.protocol.appserver.TurnInterruptParams;
@@ -66,6 +70,7 @@ import org.dean.codex.protocol.conversation.ConversationTurn;
 import org.dean.codex.protocol.conversation.ThreadActiveFlag;
 import org.dean.codex.protocol.conversation.ThreadId;
 import org.dean.codex.protocol.conversation.ThreadSource;
+import org.dean.codex.protocol.conversation.ThreadStatus;
 import org.dean.codex.protocol.conversation.ThreadSummary;
 import org.dean.codex.protocol.conversation.TurnId;
 import org.dean.codex.protocol.event.TurnEvent;
@@ -81,6 +86,7 @@ import org.dean.codex.protocol.item.UserMessageItem;
 import org.dean.codex.protocol.runtime.RuntimeTurn;
 import org.dean.codex.protocol.skill.SkillMetadata;
 import org.dean.codex.protocol.tool.ShellCommandResult;
+import org.dean.codex.protocol.appserver.ThreadSourceKind;
 import org.jspecify.annotations.NonNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -99,6 +105,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Scanner;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
@@ -386,6 +393,8 @@ public class CodexConsoleRunner implements CommandLineRunner {
                 overrides.cd(),
                 null,
                 overrides.model(),
+                sandboxValue(overrides.sandbox()),
+                approvalValue(overrides.approvalMode()),
                 null,
                 null,
                 null,
@@ -468,7 +477,11 @@ public class CodexConsoleRunner implements CommandLineRunner {
     }
 
     private ThreadId createThread(String title) {
-        return appServerSession.threadStart(new ThreadStartParams(title)).thread().threadId();
+        CliConfigOverrides overrides = currentLaunchRequest.configOverrides();
+        return appServerSession.threadStart(new ThreadStartParams(
+                title,
+                sandboxValue(overrides.sandbox()),
+                approvalValue(overrides.approvalMode()))).thread().threadId();
     }
 
     private void ensureActiveThreadLoadedAtStartup(List<ThreadSummary> startupThreads) {
@@ -530,33 +543,221 @@ public class CodexConsoleRunner implements CommandLineRunner {
     }
 
     private void printThreads(String requestedMode) {
-        String mode = requestedMode == null ? "" : requestedMode.trim().toLowerCase();
+        ThreadListQuery query = parseThreadListQuery(requestedMode);
+        if (query == null) {
+            return;
+        }
+        ThreadId resolvedParentThreadId = resolveParentThreadId(query.parentThreadIdPrefix());
+        if (query.parentThreadIdPrefix() != null && resolvedParentThreadId == null) {
+            return;
+        }
+        ThreadListParams params = new ThreadListParams(
+                null,
+                null,
+                null,
+                null,
+                query.sourceKind() == null ? null : List.of(query.sourceKind()),
+                null,
+                query.cwd(),
+                query.searchTerm(),
+                null,
+                null,
+                query.status() == null ? null : List.of(query.status()),
+                resolvedParentThreadId);
         List<ThreadSummary> threads;
-        switch (mode) {
-            case "", "active" -> threads = fetchThreads(false);
-            case "all" -> threads = fetchAllThreads();
-            case "archived" -> threads = fetchThreads(true);
+        switch (query.mode()) {
+            case "active" -> threads = fetchThreads(params, false);
+            case "all" -> threads = fetchAllThreads(params);
+            case "archived" -> threads = fetchThreads(params, true);
             case "loaded" -> {
                 Set<String> loadedIds = fetchLoadedThreadIds().stream()
                         .map(ThreadId::value)
                         .collect(Collectors.toSet());
-                threads = fetchAllThreads().stream()
+                threads = fetchAllThreads(params).stream()
                         .filter(thread -> loadedIds.contains(thread.threadId().value()))
                         .toList();
             }
             default -> {
-                System.out.println("Usage: /threads [all|loaded|archived]");
+                System.out.println("Usage: /threads [all|loaded|archived] [--search TEXT] [--cwd PATH] [--status STATUS] [--source KIND] [--parent THREAD-ID-PREFIX]");
                 return;
             }
         }
         if (threads.isEmpty()) {
-            String label = mode.isEmpty() ? "active" : mode;
+            String label = query.mode();
             System.out.println("No " + label + " threads.");
             return;
         }
         for (ThreadSummary thread : threads) {
             printThreadSummary(thread);
         }
+    }
+
+    private ThreadListQuery parseThreadListQuery(String requestedMode) {
+        List<String> tokens = tokenize(requestedMode);
+        int index = 0;
+        String mode = "active";
+        if (index < tokens.size() && isThreadListMode(tokens.get(index))) {
+            mode = normalizeThreadListMode(tokens.get(index));
+            index++;
+        }
+
+        String searchTerm = null;
+        String cwd = null;
+        ThreadStatus status = null;
+        ThreadSourceKind sourceKind = null;
+        String parentThreadIdPrefix = null;
+        while (index < tokens.size()) {
+            String token = tokens.get(index++);
+            switch (token) {
+                case "--search" -> {
+                    ParseFlagValue value = readFlagValue(tokens, index, true);
+                    if (value == null) {
+                        System.out.println("Usage: /threads [all|loaded|archived] [--search TEXT] [--cwd PATH] [--status STATUS] [--source KIND] [--parent THREAD-ID-PREFIX]");
+                        return null;
+                    }
+                    searchTerm = value.value();
+                    index = value.nextIndex();
+                }
+                case "--cwd" -> {
+                    ParseFlagValue value = readFlagValue(tokens, index, true);
+                    if (value == null) {
+                        System.out.println("Usage: /threads [all|loaded|archived] [--search TEXT] [--cwd PATH] [--status STATUS] [--source KIND] [--parent THREAD-ID-PREFIX]");
+                        return null;
+                    }
+                    cwd = value.value();
+                    index = value.nextIndex();
+                }
+                case "--status" -> {
+                    ParseFlagValue value = readFlagValue(tokens, index, false);
+                    if (value == null) {
+                        System.out.println("Usage: /threads [all|loaded|archived] [--search TEXT] [--cwd PATH] [--status STATUS] [--source KIND] [--parent THREAD-ID-PREFIX]");
+                        return null;
+                    }
+                    try {
+                        status = parseThreadStatus(value.value());
+                    }
+                    catch (IllegalArgumentException exception) {
+                        System.out.println("Unknown thread status: " + value.value());
+                        return null;
+                    }
+                    index = value.nextIndex();
+                }
+                case "--source" -> {
+                    ParseFlagValue value = readFlagValue(tokens, index, false);
+                    if (value == null) {
+                        System.out.println("Usage: /threads [all|loaded|archived] [--search TEXT] [--cwd PATH] [--status STATUS] [--source KIND] [--parent THREAD-ID-PREFIX]");
+                        return null;
+                    }
+                    try {
+                        sourceKind = parseThreadSourceKind(value.value());
+                    }
+                    catch (IllegalArgumentException exception) {
+                        System.out.println("Unknown thread source kind: " + value.value());
+                        return null;
+                    }
+                    index = value.nextIndex();
+                }
+                case "--parent" -> {
+                    ParseFlagValue value = readFlagValue(tokens, index, false);
+                    if (value == null) {
+                        System.out.println("Usage: /threads [all|loaded|archived] [--search TEXT] [--cwd PATH] [--status STATUS] [--source KIND] [--parent THREAD-ID-PREFIX]");
+                        return null;
+                    }
+                    parentThreadIdPrefix = value.value();
+                    index = value.nextIndex();
+                }
+                default -> {
+                    System.out.println("Unknown /threads flag: " + token);
+                    System.out.println("Usage: /threads [all|loaded|archived] [--search TEXT] [--cwd PATH] [--status STATUS] [--source KIND] [--parent THREAD-ID-PREFIX]");
+                    return null;
+                }
+            }
+        }
+        return new ThreadListQuery(mode, searchTerm, cwd, status, sourceKind, parentThreadIdPrefix);
+    }
+
+    private List<String> tokenize(String requestedMode) {
+        if (requestedMode == null || requestedMode.isBlank()) {
+            return List.of();
+        }
+        return List.of(requestedMode.trim().split("\\s+"));
+    }
+
+    private boolean isThreadListMode(String token) {
+        String normalized = token == null ? "" : token.trim().toLowerCase(Locale.ROOT);
+        return normalized.equals("all") || normalized.equals("loaded") || normalized.equals("archived") || normalized.equals("active");
+    }
+
+    private String normalizeThreadListMode(String token) {
+        String normalized = token == null ? "" : token.trim().toLowerCase(Locale.ROOT);
+        return normalized.equals("active") ? "active" : normalized;
+    }
+
+    private ParseFlagValue readFlagValue(List<String> tokens, int startIndex, boolean allowMultiWord) {
+        if (startIndex >= tokens.size()) {
+            return null;
+        }
+        if (!allowMultiWord) {
+            String value = tokens.get(startIndex);
+            if (value.startsWith("--")) {
+                return null;
+            }
+            return new ParseFlagValue(value, startIndex + 1);
+        }
+        StringBuilder builder = new StringBuilder();
+        int index = startIndex;
+        while (index < tokens.size() && !tokens.get(index).startsWith("--")) {
+            if (builder.length() > 0) {
+                builder.append(' ');
+            }
+            builder.append(tokens.get(index));
+            index++;
+        }
+        String value = builder.toString().trim();
+        return value.isEmpty() ? null : new ParseFlagValue(value, index);
+    }
+
+    private ThreadStatus parseThreadStatus(String value) {
+        String normalized = normalizeEnumToken(value);
+        return ThreadStatus.valueOf(normalized);
+    }
+
+    private ThreadSourceKind parseThreadSourceKind(String value) {
+        String normalized = normalizeEnumToken(value);
+        if (normalized.equals("VS_CODE") || normalized.equals("VSCODE")) {
+            return ThreadSourceKind.VS_CODE;
+        }
+        return ThreadSourceKind.valueOf(normalized);
+    }
+
+    private String normalizeEnumToken(String value) {
+        String normalized = value == null ? "" : value.trim()
+                .replace('-', '_')
+                .replace(' ', '_')
+                .toUpperCase(Locale.ROOT);
+        if (normalized.isEmpty()) {
+            throw new IllegalArgumentException("value must not be blank");
+        }
+        return normalized;
+    }
+
+    private ThreadId resolveParentThreadId(String prefix) {
+        if (prefix == null || prefix.isBlank()) {
+            return null;
+        }
+        ThreadSummary resolved = resolveRequiredThread(prefix.trim(), true);
+        return resolved == null ? null : resolved.threadId();
+    }
+
+    private record ThreadListQuery(String mode,
+                                   String searchTerm,
+                                   String cwd,
+                                   ThreadStatus status,
+                                   ThreadSourceKind sourceKind,
+                                   String parentThreadIdPrefix) {
+    }
+
+    private record ParseFlagValue(String value, int nextIndex) {
     }
 
     private void printThreadSummary(ThreadSummary thread) {
@@ -581,6 +782,15 @@ public class CodexConsoleRunner implements CommandLineRunner {
             details.add("flags=" + thread.activeFlags().stream()
                     .map(this::formatThreadFlag)
                     .collect(Collectors.joining(",")));
+        }
+        if (thread.sandboxMode() != null) {
+            details.add("sandbox=" + thread.sandboxMode());
+        }
+        if (thread.approvalMode() != null) {
+            details.add("approval=" + thread.approvalMode());
+        }
+        if (thread.cliVersion() != null) {
+            details.add("cli=" + thread.cliVersion());
         }
         if (thread.agentStatus() != null) {
             details.add("agent=" + formatEnum(thread.agentStatus()));
@@ -617,9 +827,53 @@ public class CodexConsoleRunner implements CommandLineRunner {
         if (thread.cwd() != null && !thread.cwd().isBlank()) {
             System.out.println("  cwd: " + thread.cwd());
         }
+        String gitSummary = formatThreadGitSummary(thread);
+        if (gitSummary != null) {
+            System.out.println("  git: " + gitSummary);
+        }
         if (thread.preview() != null && !thread.preview().isBlank()) {
             System.out.println("  preview: " + thread.preview());
         }
+    }
+
+    private String formatThreadGitSummary(ThreadSummary thread) {
+        if (thread == null) {
+            return null;
+        }
+        List<String> parts = new ArrayList<>();
+        if (thread.gitBranch() != null) {
+            parts.add(thread.gitBranch());
+        }
+        if (thread.gitSha() != null) {
+            parts.add(shortGitSha(thread.gitSha()));
+        }
+        if (thread.gitOriginUrl() != null) {
+            parts.add(shortGitOrigin(thread.gitOriginUrl()));
+        }
+        return parts.isEmpty() ? null : String.join("  ", parts);
+    }
+
+    private String shortGitSha(String gitSha) {
+        String normalized = gitSha == null ? "" : gitSha.trim();
+        if (normalized.isEmpty()) {
+            return normalized;
+        }
+        return normalized.length() <= 8 ? normalized : normalized.substring(0, 8);
+    }
+
+    private String shortGitOrigin(String gitOriginUrl) {
+        String normalized = gitOriginUrl == null ? "" : gitOriginUrl.trim();
+        if (normalized.isEmpty()) {
+            return normalized;
+        }
+        String candidate = normalized.endsWith(".git")
+                ? normalized.substring(0, normalized.length() - 4)
+                : normalized;
+        int slashIndex = Math.max(candidate.lastIndexOf('/'), candidate.lastIndexOf(':'));
+        if (slashIndex >= 0 && slashIndex + 1 < candidate.length()) {
+            return candidate.substring(slashIndex + 1);
+        }
+        return candidate;
     }
 
     private void printSkills() {
@@ -649,6 +903,9 @@ public class CodexConsoleRunner implements CommandLineRunner {
         }
         if (response.threadMemory() != null) {
             printThreadMemory(response.threadMemory());
+        }
+        if (!response.replaySummary().isEmpty()) {
+            printReplaySummary(response.replaySummary());
         }
         for (ConversationTurn turn : turns) {
             System.out.printf("[%s] USER: %s%n", turn.status(), turn.userInput());
@@ -692,6 +949,19 @@ public class CodexConsoleRunner implements CommandLineRunner {
                 TIMESTAMP_FORMAT.format(threadMemory.createdAt()));
         if (threadMemory.summary() != null && !threadMemory.summary().isBlank()) {
             System.out.println(threadMemory.summary());
+        }
+    }
+
+    private void printReplaySummary(List<ReconstructedReplayItem> replaySummary) {
+        System.out.println("[replay] reconstructed collaboration context:");
+        for (ReconstructedReplayItem item : replaySummary) {
+            System.out.printf("  - [%s] turn=%s %s%s%s%s%n",
+                    item.kind(),
+                    shortTurnId(item.turnId()),
+                    compactText(item.detail()),
+                    formatReplayDeliveryState(item.deliveryState()),
+                    formatReplayMailboxSummary(item.mailboxSummary()),
+                    formatReplayWakeupCause(item.wakeupCause()));
         }
     }
 
@@ -947,6 +1217,27 @@ public class CodexConsoleRunner implements CommandLineRunner {
         return " | wake=" + wakeupCause;
     }
 
+    private String formatReplayDeliveryState(org.dean.codex.protocol.item.CollabDeliveryState deliveryState) {
+        if (deliveryState == null) {
+            return "";
+        }
+        return " | delivery=" + deliveryState.jsonValue();
+    }
+
+    private String formatReplayMailboxSummary(String mailboxSummary) {
+        if (mailboxSummary == null || mailboxSummary.isBlank()) {
+            return "";
+        }
+        return " | mailbox[" + mailboxSummary + "]";
+    }
+
+    private String formatReplayWakeupCause(String wakeupCause) {
+        if (wakeupCause == null || wakeupCause.isBlank()) {
+            return "";
+        }
+        return " | wake=" + wakeupCause;
+    }
+
     private String compactText(String value) {
         String sanitized = blankToPlaceholder(value).replaceAll("\\s+", " ").trim();
         if (sanitized.length() <= 180) {
@@ -1035,6 +1326,8 @@ public class CodexConsoleRunner implements CommandLineRunner {
                 null,
                 null,
                 null,
+                sandboxValue(currentLaunchRequest.configOverrides().sandbox()),
+                approvalValue(currentLaunchRequest.configOverrides().approvalMode()),
                 null,
                 null,
                 null,
@@ -1105,6 +1398,9 @@ public class CodexConsoleRunner implements CommandLineRunner {
                 turnCount,
                 shortThreadId(targetThreadId),
                 response.thread().turnCount());
+        if (!response.replaySummary().isEmpty()) {
+            printReplaySummary(response.replaySummary());
+        }
     }
 
     private int parseRollbackCount(String rawValue) {
@@ -1222,18 +1518,26 @@ public class CodexConsoleRunner implements CommandLineRunner {
     }
 
     private List<ThreadSummary> fetchThreads(Boolean archived) {
+        return fetchThreads(null, archived);
+    }
+
+    private List<ThreadSummary> fetchThreads(ThreadListParams baseParams, Boolean archived) {
         List<ThreadSummary> threads = new ArrayList<>();
         String cursor = null;
         do {
             ThreadListResponse response = appServerSession.threadList(new ThreadListParams(
                     cursor,
                     100,
-                    null,
-                    null,
-                    null,
+                    baseParams == null ? null : baseParams.sortKey(),
+                    baseParams == null ? null : baseParams.modelProviders(),
+                    baseParams == null ? null : baseParams.sourceKinds(),
                     archived,
-                    null,
-                    null));
+                    baseParams == null ? null : baseParams.cwd(),
+                    baseParams == null ? null : baseParams.searchTerm(),
+                    baseParams == null ? null : baseParams.sandboxModes(),
+                    baseParams == null ? null : baseParams.approvalModes(),
+                    baseParams == null ? null : baseParams.statuses(),
+                    baseParams == null ? null : baseParams.parentThreadId()));
             threads.addAll(response.threads());
             cursor = response.nextCursor();
         }
@@ -1242,11 +1546,15 @@ public class CodexConsoleRunner implements CommandLineRunner {
     }
 
     private List<ThreadSummary> fetchAllThreads() {
+        return fetchAllThreads(null);
+    }
+
+    private List<ThreadSummary> fetchAllThreads(ThreadListParams baseParams) {
         Map<String, ThreadSummary> threadsById = new LinkedHashMap<>();
-        for (ThreadSummary thread : fetchThreads(false)) {
+        for (ThreadSummary thread : fetchThreads(baseParams, false)) {
             threadsById.put(thread.threadId().value(), thread);
         }
-        for (ThreadSummary thread : fetchThreads(true)) {
+        for (ThreadSummary thread : fetchThreads(baseParams, true)) {
             threadsById.put(thread.threadId().value(), thread);
         }
         return new ArrayList<>(threadsById.values());
@@ -1328,6 +1636,14 @@ public class CodexConsoleRunner implements CommandLineRunner {
 
     private String formatThreadSource(ThreadSource source) {
         return formatEnum(source);
+    }
+
+    private String sandboxValue(CliSandboxMode mode) {
+        return mode == null ? null : mode.cliValue();
+    }
+
+    private String approvalValue(CliApprovalMode mode) {
+        return mode == null ? null : mode.cliValue();
     }
 
     private String blankToNull(String value) {

@@ -170,6 +170,9 @@ public class FileSystemConversationStore implements ConversationStore {
                     .withUpdatedAt(now)
                     .withPreview(remainingTurns.isEmpty()
                             ? metadata.title()
+                            : previewText(remainingTurns.get(0).userInput(), metadata.title()))
+                    .withFirstUserInput(remainingTurns.isEmpty()
+                            ? null
                             : previewText(remainingTurns.get(0).userInput(), metadata.title()));
             writeJson(threadMetadataFile(threadId), updatedMetadata);
             return toThreadSummary(threadId, updatedMetadata);
@@ -223,10 +226,34 @@ public class FileSystemConversationStore implements ConversationStore {
                                                            String cwd,
                                                            String modelProvider,
                                                            String model) {
+        return updateThreadMetadata(threadId, cwd, modelProvider, model, null, null);
+    }
+
+    @Override
+    public synchronized ThreadSummary updateThreadMetadata(ThreadId threadId,
+                                                           String cwd,
+                                                           String modelProvider,
+                                                           String model,
+                                                           String sandboxMode,
+                                                           String approvalMode) {
+        return updateThreadMetadata(threadId, cwd, modelProvider, model, sandboxMode, approvalMode, null, null, null, null);
+    }
+
+    @Override
+    public synchronized ThreadSummary updateThreadMetadata(ThreadId threadId,
+                                                           String cwd,
+                                                           String modelProvider,
+                                                           String model,
+                                                           String sandboxMode,
+                                                           String approvalMode,
+                                                           String gitSha,
+                                                           String gitBranch,
+                                                           String gitOriginUrl,
+                                                           String cliVersion) {
         ThreadMetadata metadata = requireThread(threadId);
         Instant now = Instant.now();
         ThreadMetadata updatedMetadata = metadata
-                .withMetadata(cwd, modelProvider, model)
+                .withMetadata(cwd, modelProvider, model, sandboxMode, approvalMode, gitSha, gitBranch, gitOriginUrl, cliVersion)
                 .withUpdatedAt(now);
         try {
             writeJson(threadMetadataFile(threadId), updatedMetadata);
@@ -260,7 +287,8 @@ public class FileSystemConversationStore implements ConversationStore {
             writeJson(turnFile(threadId, turnId), turn);
             writeJson(threadMetadataFile(threadId), metadata
                     .withUpdatedAt(turn.startedAt())
-                    .withPreview(previewText(userInput, metadata.title())));
+                    .withPreview(previewText(userInput, metadata.title()))
+                    .withFirstUserInput(previewText(userInput, metadata.title())));
             return turnId;
         }
         catch (IOException exception) {
@@ -436,6 +464,13 @@ public class FileSystemConversationStore implements ConversationStore {
                 metadata.updatedAt(),
                 turnCount,
                 effectivePreview(threadId, metadata),
+                effectiveFirstUserInput(threadId, metadata),
+                metadata.sandboxMode(),
+                metadata.approvalMode(),
+                metadata.gitSha(),
+                metadata.gitBranch(),
+                metadata.gitOriginUrl(),
+                metadata.cliVersion(),
                 metadata.ephemeral(),
                 metadata.modelProvider(),
                 metadata.model(),
@@ -495,6 +530,17 @@ public class FileSystemConversationStore implements ConversationStore {
             return previewText(turns.get(0).userInput(), metadata.title());
         }
         return metadata.title();
+    }
+
+    private String effectiveFirstUserInput(ThreadId threadId, ThreadMetadata metadata) {
+        if (metadata.firstUserInput() != null && !metadata.firstUserInput().isBlank()) {
+            return metadata.firstUserInput();
+        }
+        List<ConversationTurn> turns = turns(threadId);
+        if (!turns.isEmpty()) {
+            return previewText(turns.get(0).userInput(), metadata.title());
+        }
+        return null;
     }
 
     private String defaultCwd() {
@@ -569,6 +615,13 @@ public class FileSystemConversationStore implements ConversationStore {
                                   Instant createdAt,
                                   Instant updatedAt,
                                   String preview,
+                                  String firstUserInput,
+                                  String sandboxMode,
+                                  String approvalMode,
+                                  String gitSha,
+                                  String gitBranch,
+                                  String gitOriginUrl,
+                                  String cliVersion,
                                   boolean ephemeral,
                                   String modelProvider,
                                   String model,
@@ -585,6 +638,13 @@ public class FileSystemConversationStore implements ConversationStore {
         private ThreadMetadata {
             title = title == null || title.isBlank() ? "New thread" : title.trim();
             preview = preview == null || preview.isBlank() ? null : preview.trim();
+            firstUserInput = firstUserInput == null || firstUserInput.isBlank() ? null : firstUserInput.trim();
+            sandboxMode = sandboxMode == null || sandboxMode.isBlank() ? null : sandboxMode.trim();
+            approvalMode = approvalMode == null || approvalMode.isBlank() ? null : approvalMode.trim();
+            gitSha = gitSha == null || gitSha.isBlank() ? null : gitSha.trim();
+            gitBranch = gitBranch == null || gitBranch.isBlank() ? null : gitBranch.trim();
+            gitOriginUrl = gitOriginUrl == null || gitOriginUrl.isBlank() ? null : gitOriginUrl.trim();
+            cliVersion = cliVersion == null || cliVersion.isBlank() ? null : cliVersion.trim();
             cwd = cwd == null || cwd.isBlank() ? Path.of("").toAbsolutePath().normalize().toString() : cwd;
             source = source == null ? ThreadSource.UNKNOWN : source;
         }
@@ -596,6 +656,13 @@ public class FileSystemConversationStore implements ConversationStore {
                     now,
                     now,
                     title,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
                     false,
                     null,
                     null,
@@ -627,6 +694,13 @@ public class FileSystemConversationStore implements ConversationStore {
                     now,
                     now,
                     preview,
+                    firstUserInput,
+                    sandboxMode,
+                    approvalMode,
+                    gitSha,
+                    gitBranch,
+                    gitOriginUrl,
+                    cliVersion,
                     ephemeralOverride == null ? ephemeral : ephemeralOverride,
                     modelProviderOverride == null ? modelProvider : modelProviderOverride,
                     modelOverride == null ? model : modelOverride,
@@ -648,6 +722,13 @@ public class FileSystemConversationStore implements ConversationStore {
                     createdAt,
                     newUpdatedAt == null ? Instant.now() : newUpdatedAt,
                     preview,
+                    firstUserInput,
+                    sandboxMode,
+                    approvalMode,
+                    gitSha,
+                    gitBranch,
+                    gitOriginUrl,
+                    cliVersion,
                     ephemeral,
                     modelProvider,
                     model,
@@ -671,6 +752,13 @@ public class FileSystemConversationStore implements ConversationStore {
                     createdAt,
                     updatedAt,
                     newPreview,
+                    firstUserInput,
+                    sandboxMode,
+                    approvalMode,
+                    gitSha,
+                    gitBranch,
+                    gitOriginUrl,
+                    cliVersion,
                     ephemeral,
                     modelProvider,
                     model,
@@ -685,13 +773,28 @@ public class FileSystemConversationStore implements ConversationStore {
                     agentPath);
         }
 
-        private ThreadMetadata withMetadata(String newCwd, String newModelProvider, String newModel) {
+        private ThreadMetadata withMetadata(String newCwd,
+                                            String newModelProvider,
+                                            String newModel,
+                                            String newSandboxMode,
+                                            String newApprovalMode,
+                                            String newGitSha,
+                                            String newGitBranch,
+                                            String newGitOriginUrl,
+                                            String newCliVersion) {
             return new ThreadMetadata(
                     threadId,
                     title,
                     createdAt,
                     updatedAt,
                     preview,
+                    firstUserInput,
+                    normalizeMetadataField(newSandboxMode, sandboxMode),
+                    normalizeMetadataField(newApprovalMode, approvalMode),
+                    normalizeMetadataField(newGitSha, gitSha),
+                    normalizeMetadataField(newGitBranch, gitBranch),
+                    normalizeMetadataField(newGitOriginUrl, gitOriginUrl),
+                    normalizeMetadataField(newCliVersion, cliVersion),
                     ephemeral,
                     normalizeMetadataField(newModelProvider, modelProvider),
                     normalizeMetadataField(newModel, model),
@@ -713,6 +816,13 @@ public class FileSystemConversationStore implements ConversationStore {
                     createdAt,
                     updatedAt,
                     preview,
+                    firstUserInput,
+                    sandboxMode,
+                    approvalMode,
+                    gitSha,
+                    gitBranch,
+                    gitOriginUrl,
+                    cliVersion,
                     ephemeral,
                     modelProvider,
                     model,
@@ -734,6 +844,41 @@ public class FileSystemConversationStore implements ConversationStore {
                     createdAt,
                     updatedAt,
                     newPreview,
+                    firstUserInput,
+                    sandboxMode,
+                    approvalMode,
+                    gitSha,
+                    gitBranch,
+                    gitOriginUrl,
+                    cliVersion,
+                    ephemeral,
+                    modelProvider,
+                    model,
+                    cwd,
+                    source,
+                    archivedAt,
+                    parentThreadId,
+                    agentDepth,
+                    agentClosedAt,
+                    agentNickname,
+                    agentRole,
+                    agentPath);
+        }
+
+        private ThreadMetadata withFirstUserInput(String newFirstUserInput) {
+            return new ThreadMetadata(
+                    threadId,
+                    title,
+                    createdAt,
+                    updatedAt,
+                    preview,
+                    newFirstUserInput,
+                    sandboxMode,
+                    approvalMode,
+                    gitSha,
+                    gitBranch,
+                    gitOriginUrl,
+                    cliVersion,
                     ephemeral,
                     modelProvider,
                     model,
@@ -755,6 +900,13 @@ public class FileSystemConversationStore implements ConversationStore {
                     createdAt,
                     updatedAt,
                     preview,
+                    firstUserInput,
+                    sandboxMode,
+                    approvalMode,
+                    gitSha,
+                    gitBranch,
+                    gitOriginUrl,
+                    cliVersion,
                     ephemeral,
                     modelProvider,
                     model,
@@ -776,6 +928,13 @@ public class FileSystemConversationStore implements ConversationStore {
                     createdAt,
                     updatedAt,
                     preview,
+                    firstUserInput,
+                    sandboxMode,
+                    approvalMode,
+                    gitSha,
+                    gitBranch,
+                    gitOriginUrl,
+                    cliVersion,
                     ephemeral,
                     modelProvider,
                     model,
@@ -797,6 +956,13 @@ public class FileSystemConversationStore implements ConversationStore {
                     createdAt,
                     updatedAt,
                     preview,
+                    firstUserInput,
+                    sandboxMode,
+                    approvalMode,
+                    gitSha,
+                    gitBranch,
+                    gitOriginUrl,
+                    cliVersion,
                     ephemeral,
                     modelProvider,
                     model,
@@ -818,6 +984,13 @@ public class FileSystemConversationStore implements ConversationStore {
                     createdAt,
                     updatedAt,
                     preview,
+                    firstUserInput,
+                    sandboxMode,
+                    approvalMode,
+                    gitSha,
+                    gitBranch,
+                    gitOriginUrl,
+                    cliVersion,
                     ephemeral,
                     modelProvider,
                     model,

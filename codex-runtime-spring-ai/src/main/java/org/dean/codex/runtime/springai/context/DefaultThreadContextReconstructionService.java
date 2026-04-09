@@ -5,6 +5,7 @@ import org.dean.codex.core.context.ThreadContextReconstructionService;
 import org.dean.codex.core.conversation.ConversationStore;
 import org.dean.codex.core.history.ThreadHistoryStore;
 import org.dean.codex.protocol.context.ReconstructedThreadContext;
+import org.dean.codex.protocol.context.ReconstructedReplayItem;
 import org.dean.codex.protocol.context.ReconstructedTurnActivity;
 import org.dean.codex.protocol.context.ThreadMemory;
 import org.dean.codex.protocol.conversation.MessageRole;
@@ -38,6 +39,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -73,6 +75,7 @@ public class DefaultThreadContextReconstructionService implements ThreadContextR
                     recentTurns.stream().flatMap(this::messagesForTurn).toList(),
                     recentTurns,
                     recentTurns.stream().flatMap(this::activitiesForTurn).toList(),
+                    replaySummaryForTurns(recentTurns),
                     Instant.now());
         }
 
@@ -113,6 +116,9 @@ public class DefaultThreadContextReconstructionService implements ThreadContextR
                 recentMessages,
                 recentTurns,
                 recentActivities,
+                mergeReplaySummaries(
+                        replaySummaryForHistory(visibleHistory),
+                        replaySummaryForTurns(recentTurns)),
                 Instant.now());
     }
 
@@ -144,6 +150,92 @@ public class DefaultThreadContextReconstructionService implements ThreadContextR
                 "historyCompactionSummary",
                 "compactionSummary: " + summaryItem.summaryText(),
                 summaryItem.createdAt());
+    }
+
+    private List<ReconstructedReplayItem> replaySummaryForTurns(List<ConversationTurn> turns) {
+        if (turns == null || turns.isEmpty()) {
+            return List.of();
+        }
+        List<ReconstructedReplayItem> replaySummary = new ArrayList<>();
+        for (ConversationTurn turn : turns) {
+            if (turn == null || turn.items() == null || turn.items().isEmpty()) {
+                continue;
+            }
+            for (TurnItem item : turn.items()) {
+                replaySummaryForItem(item).ifPresent(replaySummary::add);
+            }
+        }
+        return List.copyOf(replaySummary);
+    }
+
+    private List<ReconstructedReplayItem> replaySummaryForHistory(List<ThreadHistoryItem> historyItems) {
+        if (historyItems == null || historyItems.isEmpty()) {
+            return List.of();
+        }
+        List<ReconstructedReplayItem> replaySummary = new ArrayList<>();
+        for (ThreadHistoryItem item : historyItems) {
+            replaySummaryForItem(item).ifPresent(replaySummary::add);
+        }
+        return List.copyOf(replaySummary);
+    }
+
+    private List<ReconstructedReplayItem> mergeReplaySummaries(List<ReconstructedReplayItem> first,
+                                                               List<ReconstructedReplayItem> second) {
+        if ((first == null || first.isEmpty()) && (second == null || second.isEmpty())) {
+            return List.of();
+        }
+        LinkedHashSet<ReconstructedReplayItem> merged = new LinkedHashSet<>();
+        if (first != null) {
+            merged.addAll(first);
+        }
+        if (second != null) {
+            merged.addAll(second);
+        }
+        return List.copyOf(merged);
+    }
+
+    private Optional<ReconstructedReplayItem> replaySummaryForItem(Object item) {
+        if (item instanceof HistoryCompactionSummaryItem summaryItem) {
+            return Optional.of(new ReconstructedReplayItem(
+                    summaryItem.anchorTurnId(),
+                    "compaction",
+                    "compactionSummary: " + summaryItem.summaryText(),
+                    null,
+                    null,
+                    null,
+                    summaryItem.createdAt()));
+        }
+        if (item instanceof HistoryCollabToolCallItem collabItem) {
+            return Optional.of(new ReconstructedReplayItem(
+                    collabItem.turnId(),
+                    "collaboration",
+                    "collabToolCall: " + collabItem.tool() + " " + collabItem.status().jsonValue(),
+                    collabItem.deliveryState(),
+                    summarizeMailboxes(collabItem.mailboxes()),
+                    collabItem.wakeupCause(),
+                    collabItem.createdAt()));
+        }
+        if (item instanceof CollabToolCallItem collabItem) {
+            return Optional.of(new ReconstructedReplayItem(
+                    new org.dean.codex.protocol.conversation.TurnId(""),
+                    "collaboration",
+                    "collabToolCall: " + collabItem.tool() + " " + collabItem.status().jsonValue(),
+                    collabItem.deliveryState(),
+                    summarizeMailboxes(collabItem.mailboxes()),
+                    collabItem.wakeupCause(),
+                    collabItem.createdAt()));
+        }
+        return Optional.empty();
+    }
+
+    private String summarizeMailboxes(Map<String, org.dean.codex.protocol.agent.AgentMailboxState> mailboxes) {
+        if (mailboxes == null || mailboxes.isEmpty()) {
+            return null;
+        }
+        return mailboxes.entrySet().stream()
+                .map(entry -> entry.getKey() + " pending=" + entry.getValue().pendingMessages()
+                        + " seq=" + entry.getValue().sequence())
+                .collect(Collectors.joining(", "));
     }
 
     private Optional<ReconstructedTurnActivity> activityForItem(ThreadHistoryItem item, ConversationTurn turn) {

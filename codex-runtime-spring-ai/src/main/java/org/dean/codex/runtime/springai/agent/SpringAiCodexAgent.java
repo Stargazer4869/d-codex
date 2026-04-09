@@ -49,6 +49,9 @@ import org.dean.codex.protocol.context.ReconstructedTurnActivity;
 import org.dean.codex.protocol.skill.SkillMetadata;
 import org.dean.codex.protocol.tool.CommandApprovalDecision;
 import org.dean.codex.runtime.springai.config.CodexProperties;
+import org.dean.codex.runtime.springai.prompt.DefaultPromptAssemblyService;
+import org.dean.codex.runtime.springai.prompt.PromptAssemblyService;
+import org.dean.codex.runtime.springai.prompt.ResolvedPrompt;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -86,6 +89,7 @@ public class SpringAiCodexAgent implements CodexAgent {
     private final ThreadContextReconstructionService threadContextReconstructionService;
     private final ContextManager contextManager;
     private final SkillService skillService;
+    private final PromptAssemblyService promptAssemblyService;
     private final ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
     private final Path workspaceRoot;
     private final int maxSteps;
@@ -106,7 +110,8 @@ public class SpringAiCodexAgent implements CodexAgent {
                               ContextManager contextManager,
                               SkillService skillService,
                               @Qualifier("codexWorkspaceRoot") Path workspaceRoot,
-                              CodexProperties codexProperties) {
+                              CodexProperties codexProperties,
+                              PromptAssemblyService promptAssemblyService) {
         this(chatClientBuilder,
                 fileReaderTool,
                 fileSearchTool,
@@ -119,7 +124,8 @@ public class SpringAiCodexAgent implements CodexAgent {
                 contextManager,
                 skillService,
                 workspaceRoot,
-                codexProperties);
+                codexProperties,
+                promptAssemblyService);
     }
 
     SpringAiCodexAgent(ChatClient.Builder chatClientBuilder,
@@ -147,7 +153,8 @@ public class SpringAiCodexAgent implements CodexAgent {
                 contextManager,
                 skillService,
                 workspaceRoot,
-                codexProperties);
+                codexProperties,
+                null);
     }
 
     private SpringAiCodexAgent(ChatClient.Builder chatClientBuilder,
@@ -162,7 +169,8 @@ public class SpringAiCodexAgent implements CodexAgent {
                                ContextManager contextManager,
                                SkillService skillService,
                                Path workspaceRoot,
-                               CodexProperties codexProperties) {
+                               CodexProperties codexProperties,
+                               PromptAssemblyService promptAssemblyService) {
         this.chatClient = chatClientBuilder.clone()
                 .defaultAdvisors(new SimpleLoggerAdvisor())
                 .build();
@@ -183,6 +191,9 @@ public class SpringAiCodexAgent implements CodexAgent {
         CodexProperties.Model model = codexProperties.getModel();
         this.autoCompactTokenLimit = Math.max(0, model.getAutoCompactTokenLimit());
         this.contextWindow = Math.max(0, model.getContextWindow());
+        this.promptAssemblyService = promptAssemblyService == null
+                ? new DefaultPromptAssemblyService(this.workspaceRoot, this.maxSteps, this.maxActionsPerStep)
+                : promptAssemblyService;
     }
 
     @Override
@@ -388,9 +399,17 @@ public class SpringAiCodexAgent implements CodexAgent {
                                           List<ResolvedSkill> selectedSkills,
                                           List<SkillMetadata> availableSkills,
                                           List<String> steeringInputs) {
-        String systemPrompt = buildSystemPrompt(availableSkills);
         ReconstructedThreadContext reconstructedContext = threadContextReconstructionService.reconstruct(threadId);
-        String userPrompt = buildUserPrompt(reconstructedContext, input, scratchpad, step, selectedSkills, steeringInputs);
+        ResolvedPrompt resolvedPrompt = promptAssemblyService.assemblePlannerPrompt(
+                reconstructedContext,
+                input,
+                scratchpad,
+                step,
+                selectedSkills,
+                availableSkills,
+                steeringInputs);
+        String systemPrompt = resolvedPrompt.systemPrompt();
+        String userPrompt = resolvedPrompt.userPrompt();
         logger.debug("planner request start thread={} turn={} step={} systemChars={} userChars={} recentMessages={} recentTurns={} recentActivities={} selectedSkills={} availableSkills={} steeringInputs={}",
                 threadId.value(),
                 turnId == null ? "(null)" : turnId.value(),
@@ -494,8 +513,16 @@ public class SpringAiCodexAgent implements CodexAgent {
                                             List<SkillMetadata> availableSkills,
                                             List<String> steeringInputs) {
         ReconstructedThreadContext reconstructedContext = threadContextReconstructionService.reconstruct(threadId);
-        String systemPrompt = buildSystemPrompt(availableSkills);
-        String userPrompt = buildUserPrompt(reconstructedContext, input, scratchpad, step, selectedSkills, steeringInputs);
+        ResolvedPrompt resolvedPrompt = promptAssemblyService.assemblePlannerPrompt(
+                reconstructedContext,
+                input,
+                scratchpad,
+                step,
+                selectedSkills,
+                availableSkills,
+                steeringInputs);
+        String systemPrompt = resolvedPrompt.systemPrompt();
+        String userPrompt = resolvedPrompt.userPrompt();
         return estimateTokens(systemPrompt) + estimateTokens(userPrompt);
     }
 
@@ -810,116 +837,7 @@ public class SpringAiCodexAgent implements CodexAgent {
     }
 
     String buildSystemPrompt(List<SkillMetadata> availableSkills) {
-        String basePrompt = """
-                You are Codex, a coding agent running inside a local workspace.
-                Workspace root: %s
-
-                Your job is to make progress through short, verifiable tool batches.
-                Available actions:
-                - READ_FILE: read a file relative to the workspace root
-                - SEARCH_FILES: search for text or regex matches across the workspace or inside a scoped path
-                - APPLY_PATCH: replace exact old text with new text inside an existing file
-                - WRITE_FILE: create or overwrite a file relative to the workspace root
-                - RUN_COMMAND: run a zsh command from the workspace root, subject to approval policy
-                - spawn_agent: spawn a delegated sub-agent from the current thread
-                - send_message: queue a plain message to an existing sub-agent thread without starting work
-                - assign_task: queue work for an existing sub-agent thread and let it start if idle
-                - send_input: compatibility alias for assign_task
-                - wait_agent: wait for one or more sub-agents to change status or mailbox state
-                - resume_agent: resume a paused or waiting sub-agent thread
-                - close_agent: close a sub-agent thread subtree
-                - list_agents: list sub-agents under the current thread or a requested parent thread
-
-                Rules:
-                - Return JSON only. Do not wrap it in prose.
-                - Use this schema exactly:
-                  {
-                    "summary": "brief summary of the next step",
-                    "editPlan": {
-                      "summary": "optional edit plan for intended file changes",
-                      "edits": [
-                        {
-                          "path": "relative/path",
-                          "type": "CREATE | MODIFY | DELETE | VERIFY",
-                          "description": "what you intend to change"
-                        }
-                      ]
-                    },
-                    "actions": [
-                      {
-                        "action": "READ_FILE | SEARCH_FILES | APPLY_PATCH | WRITE_FILE | RUN_COMMAND",
-                        "path": "relative/path/when-needed",
-                        "query": "search query when searching",
-                        "oldText": "exact text to replace when applying a patch",
-                        "newText": "replacement text when applying a patch",
-                        "replaceAll": false,
-                        "content": "file content when writing",
-                        "command": "shell command when running one"
-                      },
-                      {
-                        "action": "spawn_agent",
-                        "taskName": "delegate a focused task",
-                        "prompt": "optional task prompt for the child agent",
-                        "nickname": "optional agent nickname",
-                        "role": "optional agent role",
-                        "depth": 1,
-                        "modelProvider": "optional model provider",
-                        "model": "optional model name",
-                        "cwd": "optional child workspace cwd"
-                      },
-                      {
-                        "action": "send_input",
-                        "threadId": "agent-thread-id",
-                        "content": "message to send to the agent",
-                        "interrupt": false
-                      },
-                      {
-                        "action": "wait_agent",
-                        "threadIds": ["agent-thread-id"],
-                        "timeoutMillis": 1000
-                      },
-                      {
-                        "action": "resume_agent",
-                        "threadId": "agent-thread-id"
-                      },
-                      {
-                        "action": "close_agent",
-                        "threadId": "agent-thread-id"
-                      },
-                      {
-                        "action": "list_agents",
-                        "threadId": "optional-parent-thread-id",
-                        "recursive": true
-                      }
-                    ],
-                    "finalAnswer": "final answer when the task is complete"
-                  }
-                - Return either a non-empty actions array or finalAnswer.
-                - Do not return more than %d actions in one step.
-                - Actions are executed in the order you provide them.
-                - Omit unused fields or set them to null.
-                - Prefer SEARCH_FILES to locate code before reading full files.
-                - Prefer APPLY_PATCH for targeted edits and WRITE_FILE only for new files or full rewrites.
-                - Include editPlan whenever you expect to modify files.
-                - Read an existing file before editing it.
-                - Use agent delegation when a task is clearer as a focused sub-task than as a local edit batch.
-                - Prefer inspection, tests, and small verified edits.
-                - Shell commands may be allowed, require approval, or be blocked. If a command is not executed, use the tool result to adapt.
-                - Avoid destructive shell commands.
-                - Keep all paths relative to the workspace root.
-                - After each batch, use the observation from all executed actions before deciding the next step.
-                """.formatted(workspaceRoot, maxActionsPerStep);
-        if (availableSkills == null || availableSkills.isEmpty()) {
-            return basePrompt;
-        }
-        return basePrompt + System.lineSeparator()
-                + """
-                Available skills:
-                %s
-
-                Skills are selected explicitly by user input, usually with `$skill-name`.
-                When a skill is selected, its instructions are injected into the turn context.
-                """.formatted(renderAvailableSkills(availableSkills));
+        return promptAssemblyService.buildSystemPrompt(availableSkills);
     }
 
     String buildUserPrompt(ReconstructedThreadContext reconstructedContext,
@@ -928,48 +846,13 @@ public class SpringAiCodexAgent implements CodexAgent {
                            int step,
                            List<ResolvedSkill> selectedSkills,
                            List<String> steeringInputs) {
-        String historyBlock = reconstructedContext.recentMessages().stream()
-                .map(message -> message.role().name() + ": " + message.content())
-                .collect(Collectors.joining(System.lineSeparator()));
-        String eventBlock = reconstructedContext.recentActivities().stream()
-                .map(activity -> reconstructedContext.threadId().value() + "/" + activity.turnId().value() + " " + renderActivityForPrompt(activity))
-                .collect(Collectors.joining(System.lineSeparator()));
-
-        return """
-                Planner step number: %d of %d
-
-                Active thread:
-                %s
-
-                Recent conversation:
-                %s
-
-                Recent turn events:
-                %s
-
-                Selected skill instructions:
-                %s
-
-                Steering requests since last step:
-                %s
-
-                Latest user request:
-                %s
-
-                Scratchpad so far:
-                %s
-
-                Choose the next tool batch and return JSON only.
-                """.formatted(
-                step,
-                maxSteps,
-                reconstructedContext.threadId().value(),
-                historyBlock.isBlank() ? "(none)" : historyBlock,
-                eventBlock.isBlank() ? "(none)" : eventBlock,
-                renderSelectedSkills(selectedSkills),
-                steeringInputs == null || steeringInputs.isEmpty() ? "(none)" : String.join(System.lineSeparator(), steeringInputs),
+        return promptAssemblyService.buildUserPrompt(
+                reconstructedContext,
                 input,
-                scratchpad.isBlank() ? "(none yet)" : scratchpad);
+                scratchpad,
+                step,
+                selectedSkills,
+                steeringInputs);
     }
 
     private String describeActions(List<ToolActionRequest> actions) {
@@ -1343,10 +1226,6 @@ public class SpringAiCodexAgent implements CodexAgent {
         };
     }
 
-    private String renderActivityForPrompt(ReconstructedTurnActivity activity) {
-        return blankToPlaceholder(activity.sourceType()) + ": " + blankToPlaceholder(activity.detail());
-    }
-
     private List<ToolActionRequest> parseActions(JsonNode root) {
         if (root == null || root.isMissingNode()) {
             return List.of();
@@ -1686,30 +1565,6 @@ public class SpringAiCodexAgent implements CodexAgent {
 
     private SkillUseItem skillUseItem(List<SkillMetadata> selectedSkills) {
         return new SkillUseItem(new ItemId(UUID.randomUUID().toString()), selectedSkills, Instant.now());
-    }
-
-    private String renderAvailableSkills(List<SkillMetadata> availableSkills) {
-        return availableSkills.stream()
-                .map(skill -> "- %s: %s (file: %s)"
-                        .formatted(skill.name(), blankToPlaceholder(skill.shortDescription()), skill.path()))
-                .collect(Collectors.joining(System.lineSeparator()));
-    }
-
-    private String renderSelectedSkills(List<ResolvedSkill> selectedSkills) {
-        if (selectedSkills == null || selectedSkills.isEmpty()) {
-            return "(none)";
-        }
-        return selectedSkills.stream()
-                .map(skill -> """
-                        Skill: %s
-                        Path: %s
-                        Instructions:
-                        %s
-                        """.formatted(
-                        skill.metadata().name(),
-                        skill.metadata().path(),
-                        skill.instructions().trim()))
-                .collect(Collectors.joining(System.lineSeparator()));
     }
 
     private record BatchExecutionOutcome(String observation, boolean awaitingApproval, List<String> approvalIds) {

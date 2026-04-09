@@ -2,9 +2,12 @@ package org.dean.codex.protocol.appserver;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.dean.codex.protocol.context.ReconstructedThreadContext;
+import org.dean.codex.protocol.context.ReconstructedReplayItem;
 import org.dean.codex.protocol.context.ThreadMemory;
 import org.dean.codex.protocol.conversation.ThreadSummary;
 import org.dean.codex.protocol.conversation.ThreadId;
+import org.dean.codex.protocol.conversation.ThreadStatus;
+import org.dean.codex.protocol.conversation.TurnId;
 import org.dean.codex.protocol.conversation.ThreadSource;
 import org.junit.jupiter.api.Test;
 
@@ -28,11 +31,18 @@ class ThreadLifecycleJsonTest {
                 List.of(ThreadSourceKind.CLI, ThreadSourceKind.SUB_AGENT),
                 Boolean.TRUE,
                 "/Users/chenzhu/Git/play-with-ai",
-                "thread");
+                "thread",
+                List.of("workspace-write"),
+                List.of("review-sensitive"),
+                List.of(ThreadStatus.ACTIVE, ThreadStatus.IDLE),
+                new ThreadId("thread-parent"));
         assertEquals(listParams, objectMapper.readValue(objectMapper.writeValueAsString(listParams), ThreadListParams.class));
 
         ThreadReadParams readParams = new ThreadReadParams(new ThreadId("thread-1"), true);
         assertEquals(readParams, objectMapper.readValue(objectMapper.writeValueAsString(readParams), ThreadReadParams.class));
+
+        ThreadStartParams startParams = new ThreadStartParams("App thread", "workspace-write", "review-sensitive");
+        assertEquals(startParams, objectMapper.readValue(objectMapper.writeValueAsString(startParams), ThreadStartParams.class));
 
         ThreadForkParams forkParams = new ThreadForkParams(
                 new ThreadId("thread-1"),
@@ -41,11 +51,26 @@ class ThreadLifecycleJsonTest {
                 "/tmp/worktree",
                 "openai",
                 "gpt-5.4",
+                "read-only",
+                "auto",
                 ThreadSource.APP_SERVER,
                 "worker-1",
                 "worker",
                 "root/worker-1");
         assertEquals(forkParams, objectMapper.readValue(objectMapper.writeValueAsString(forkParams), ThreadForkParams.class));
+
+        ThreadMetadataUpdateParams metadataUpdateParams = new ThreadMetadataUpdateParams(
+                new ThreadId("thread-1"),
+                "/workspace/app",
+                "openai",
+                "gpt-5.4",
+                "workspace-write",
+                "review-sensitive",
+                "1234567890abcdef",
+                "main",
+                "git@github.com:org/repo.git",
+                "1.0-SNAPSHOT");
+        assertEquals(metadataUpdateParams, objectMapper.readValue(objectMapper.writeValueAsString(metadataUpdateParams), ThreadMetadataUpdateParams.class));
 
         ThreadArchiveParams archiveParams = new ThreadArchiveParams(new ThreadId("thread-1"));
         assertEquals(archiveParams, objectMapper.readValue(objectMapper.writeValueAsString(archiveParams), ThreadArchiveParams.class));
@@ -56,11 +81,52 @@ class ThreadLifecycleJsonTest {
         ThreadRollbackParams rollbackParams = new ThreadRollbackParams(new ThreadId("thread-1"), 2);
         assertEquals(rollbackParams, objectMapper.readValue(objectMapper.writeValueAsString(rollbackParams), ThreadRollbackParams.class));
 
+        ThreadRollbackResponse rollbackResponse = new ThreadRollbackResponse(
+                new ThreadSummary(
+                        new ThreadId("thread-1"),
+                        "Demo thread",
+                        Instant.parse("2026-04-01T00:00:00Z"),
+                        Instant.parse("2026-04-01T00:00:05Z"),
+                        2),
+                List.of(),
+                List.of(new ReconstructedReplayItem(
+                        new TurnId("turn-1"),
+                        "collaboration",
+                        "collabToolCall: spawn_agent completed",
+                        org.dean.codex.protocol.item.CollabDeliveryState.DISPATCHED,
+                        "agent-1 pending=0 seq=2",
+                        "mailbox_updated",
+                        Instant.parse("2026-04-01T00:00:07Z"))));
+        assertEquals(rollbackResponse, objectMapper.readValue(objectMapper.writeValueAsString(rollbackResponse), ThreadRollbackResponse.class));
+
         ThreadLoadedListParams loadedListParams = new ThreadLoadedListParams("cursor-2", 50);
         assertEquals(loadedListParams, objectMapper.readValue(objectMapper.writeValueAsString(loadedListParams), ThreadLoadedListParams.class));
 
         ThreadLoadedListResponse loadedListResponse = new ThreadLoadedListResponse(List.of(new ThreadId("thread-1")), "next-cursor");
         assertEquals(loadedListResponse, objectMapper.readValue(objectMapper.writeValueAsString(loadedListResponse), ThreadLoadedListResponse.class));
+
+        ThreadResumeResponse resumeResponse = new ThreadResumeResponse(
+                new ThreadSummary(
+                        new ThreadId("thread-1"),
+                        "Demo thread",
+                        Instant.parse("2026-04-01T00:00:00Z"),
+                        Instant.parse("2026-04-01T00:00:05Z"),
+                        2),
+                List.of(new ReconstructedReplayItem(
+                        new TurnId("turn-1"),
+                        "collaboration",
+                        "collabToolCall: spawn_agent completed",
+                        org.dean.codex.protocol.item.CollabDeliveryState.DISPATCHED,
+                        "agent-1 pending=0 seq=2",
+                        "mailbox_updated",
+                        Instant.parse("2026-04-01T00:00:07Z"))),
+                List.of(new BackgroundTerminalSummary(
+                        "terminal-1",
+                        12345L,
+                        "sleep 60 &",
+                        "/workspace/thread-1",
+                        Instant.parse("2026-04-01T00:00:08Z"))));
+        assertEquals(resumeResponse, objectMapper.readValue(objectMapper.writeValueAsString(resumeResponse), ThreadResumeResponse.class));
 
         ThreadListResponse listResponse = new ThreadListResponse(
                 List.of(new ThreadSummary(
@@ -81,7 +147,35 @@ class ThreadLifecycleJsonTest {
                         2),
                 List.of(),
                 new ThreadMemory("memory-1", new ThreadId("thread-1"), "summary", List.of(), 0, Instant.parse("2026-04-01T00:00:06Z")),
-                new ReconstructedThreadContext(new ThreadId("thread-1"), null, List.of(), List.of(), List.of(), Instant.parse("2026-04-01T00:00:07Z")),
+                new ReconstructedThreadContext(
+                        new ThreadId("thread-1"),
+                        null,
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        List.of(new ReconstructedReplayItem(
+                                new TurnId("turn-1"),
+                                "collaboration",
+                                "collabToolCall: spawn_agent completed",
+                                org.dean.codex.protocol.item.CollabDeliveryState.DISPATCHED,
+                                "agent-1 pending=0 seq=2",
+                                "mailbox_updated",
+                                Instant.parse("2026-04-01T00:00:07Z"))),
+                        Instant.parse("2026-04-01T00:00:07Z")),
+                List.of(new ReconstructedReplayItem(
+                        new TurnId("turn-1"),
+                        "collaboration",
+                        "collabToolCall: spawn_agent completed",
+                        org.dean.codex.protocol.item.CollabDeliveryState.DISPATCHED,
+                        "agent-1 pending=0 seq=2",
+                        "mailbox_updated",
+                        Instant.parse("2026-04-01T00:00:07Z"))),
+                List.of(new BackgroundTerminalSummary(
+                        "terminal-1",
+                        12345L,
+                        "sleep 60 &",
+                        "/workspace/thread-1",
+                        Instant.parse("2026-04-01T00:00:08Z"))),
                 new ThreadId("thread-root"),
                 List.of(new ThreadSummary(
                         new ThreadId("thread-child"),

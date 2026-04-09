@@ -26,7 +26,7 @@ class SlashCommandParserTest {
         assertTrue(registry.find("/use").isPresent());
 
         SlashCommandSpec threads = registry.find("threads").orElseThrow();
-        assertEquals("/threads [all|loaded|archived]", threads.syntax());
+        assertEquals("/threads [all|loaded|archived] [--search TEXT] [--cwd PATH] [--status STATUS] [--source KIND] [--parent THREAD-ID-PREFIX]", threads.syntax());
         assertEquals("/threads", threads.slashForms().get(0));
         assertTrue(registry.find("/threads").isPresent());
     }

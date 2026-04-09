@@ -13,6 +13,7 @@ public class CodexProperties {
     private final Shell shell = new Shell();
     private final Skills skills = new Skills();
     private final Context context = new Context();
+    private final Prompt prompt = new Prompt();
 
     public String getWorkspaceRoot() {
         return workspaceRoot;
@@ -48,6 +49,10 @@ public class CodexProperties {
 
     public Context getContext() {
         return context;
+    }
+
+    public Prompt getPrompt() {
+        return prompt;
     }
 
     public static class Agent {
@@ -181,6 +186,72 @@ public class CodexProperties {
 
         public void setPreserveRecentTurns(int preserveRecentTurns) {
             this.preserveRecentTurns = preserveRecentTurns;
+        }
+    }
+
+    public static class Prompt {
+        private int projectDocMaxBytes = 32 * 1024;
+        private String baseInstructionsText = "";
+        private String baseInstructionsFile = "";
+        private String projectInstructionsText = "";
+        private String projectInstructionsFile = "";
+        private String userInstructionsText = "";
+        private String userInstructionsFile = "";
+
+        public int getProjectDocMaxBytes() {
+            return projectDocMaxBytes;
+        }
+
+        public void setProjectDocMaxBytes(int projectDocMaxBytes) {
+            this.projectDocMaxBytes = projectDocMaxBytes;
+        }
+
+        public String getBaseInstructionsText() {
+            return baseInstructionsText;
+        }
+
+        public void setBaseInstructionsText(String baseInstructionsText) {
+            this.baseInstructionsText = baseInstructionsText;
+        }
+
+        public String getBaseInstructionsFile() {
+            return baseInstructionsFile;
+        }
+
+        public void setBaseInstructionsFile(String baseInstructionsFile) {
+            this.baseInstructionsFile = baseInstructionsFile;
+        }
+
+        public String getProjectInstructionsText() {
+            return projectInstructionsText;
+        }
+
+        public void setProjectInstructionsText(String projectInstructionsText) {
+            this.projectInstructionsText = projectInstructionsText;
+        }
+
+        public String getProjectInstructionsFile() {
+            return projectInstructionsFile;
+        }
+
+        public void setProjectInstructionsFile(String projectInstructionsFile) {
+            this.projectInstructionsFile = projectInstructionsFile;
+        }
+
+        public String getUserInstructionsText() {
+            return userInstructionsText;
+        }
+
+        public void setUserInstructionsText(String userInstructionsText) {
+            this.userInstructionsText = userInstructionsText;
+        }
+
+        public String getUserInstructionsFile() {
+            return userInstructionsFile;
+        }
+
+        public void setUserInstructionsFile(String userInstructionsFile) {
+            this.userInstructionsFile = userInstructionsFile;
         }
     }
 }

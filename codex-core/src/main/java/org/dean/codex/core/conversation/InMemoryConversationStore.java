@@ -88,6 +88,9 @@ public class InMemoryConversationStore implements ConversationStore {
             record.preview = remainingTurns.isEmpty()
                     ? record.title()
                     : previewText(remainingTurns.get(0).userInput(), record.title());
+            record.firstUserInput = remainingTurns.isEmpty()
+                    ? null
+                    : previewText(remainingTurns.get(0).userInput(), record.title());
         }
         record.updatedAt = Instant.now();
         return toThreadSummary(threadId, record);
@@ -125,8 +128,32 @@ public class InMemoryConversationStore implements ConversationStore {
                                                            String cwd,
                                                            String modelProvider,
                                                            String model) {
+        return updateThreadMetadata(threadId, cwd, modelProvider, model, null, null);
+    }
+
+    @Override
+    public synchronized ThreadSummary updateThreadMetadata(ThreadId threadId,
+                                                           String cwd,
+                                                           String modelProvider,
+                                                           String model,
+                                                           String sandboxMode,
+                                                           String approvalMode) {
+        return updateThreadMetadata(threadId, cwd, modelProvider, model, sandboxMode, approvalMode, null, null, null, null);
+    }
+
+    @Override
+    public synchronized ThreadSummary updateThreadMetadata(ThreadId threadId,
+                                                           String cwd,
+                                                           String modelProvider,
+                                                           String model,
+                                                           String sandboxMode,
+                                                           String approvalMode,
+                                                           String gitSha,
+                                                           String gitBranch,
+                                                           String gitOriginUrl,
+                                                           String cliVersion) {
         ThreadRecord record = requireThread(threadId);
-        ThreadRecord updated = record.withMetadata(cwd, modelProvider, model);
+        ThreadRecord updated = record.withMetadata(cwd, modelProvider, model, sandboxMode, approvalMode, gitSha, gitBranch, gitOriginUrl, cliVersion);
         threads.put(threadId, updated);
         return toThreadSummary(threadId, updated);
     }
@@ -143,6 +170,7 @@ public class InMemoryConversationStore implements ConversationStore {
         Instant safeStartedAt = startedAt == null ? Instant.now() : startedAt;
         if (record.turns().isEmpty()) {
             record.preview = previewText(userInput, record.title());
+            record.firstUserInput = record.preview;
         }
         record.turns().add(new ConversationTurn(
                 turnId,
@@ -338,6 +366,13 @@ public class InMemoryConversationStore implements ConversationStore {
         private final Instant createdAt;
         private Instant updatedAt;
         private String preview;
+        private String firstUserInput;
+        private String sandboxMode;
+        private String approvalMode;
+        private String gitSha;
+        private String gitBranch;
+        private String gitOriginUrl;
+        private String cliVersion;
         private final boolean ephemeral;
         private String modelProvider;
         private String model;
@@ -358,6 +393,13 @@ public class InMemoryConversationStore implements ConversationStore {
                              Instant createdAt,
                              Instant updatedAt,
                              String preview,
+                             String firstUserInput,
+                             String sandboxMode,
+                             String approvalMode,
+                             String gitSha,
+                             String gitBranch,
+                             String gitOriginUrl,
+                             String cliVersion,
                              boolean ephemeral,
                              String modelProvider,
                              String model,
@@ -377,6 +419,13 @@ public class InMemoryConversationStore implements ConversationStore {
             this.createdAt = createdAt;
             this.updatedAt = updatedAt;
             this.preview = preview;
+            this.firstUserInput = firstUserInput;
+            this.sandboxMode = sandboxMode;
+            this.approvalMode = approvalMode;
+            this.gitSha = gitSha;
+            this.gitBranch = gitBranch;
+            this.gitOriginUrl = gitOriginUrl;
+            this.cliVersion = cliVersion;
             this.ephemeral = ephemeral;
             this.modelProvider = modelProvider;
             this.model = model;
@@ -400,6 +449,13 @@ public class InMemoryConversationStore implements ConversationStore {
                     now,
                     now,
                     title,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
                     false,
                     null,
                     null,
@@ -423,6 +479,13 @@ public class InMemoryConversationStore implements ConversationStore {
                     now,
                     now,
                     summary.preview(),
+                    summary.firstUserInput(),
+                    summary.sandboxMode(),
+                    summary.approvalMode(),
+                    summary.gitSha(),
+                    summary.gitBranch(),
+                    summary.gitOriginUrl(),
+                    summary.cliVersion(),
                     summary.ephemeral(),
                     summary.modelProvider(),
                     summary.model(),
@@ -453,6 +516,34 @@ public class InMemoryConversationStore implements ConversationStore {
 
         private String preview() {
             return preview;
+        }
+
+        private String firstUserInput() {
+            return firstUserInput;
+        }
+
+        private String sandboxMode() {
+            return sandboxMode;
+        }
+
+        private String approvalMode() {
+            return approvalMode;
+        }
+
+        private String gitSha() {
+            return gitSha;
+        }
+
+        private String gitBranch() {
+            return gitBranch;
+        }
+
+        private String gitOriginUrl() {
+            return gitOriginUrl;
+        }
+
+        private String cliVersion() {
+            return cliVersion;
         }
 
         private boolean ephemeral() {
@@ -519,6 +610,13 @@ public class InMemoryConversationStore implements ConversationStore {
                     createdAt,
                     Instant.now(),
                     preview == null || preview.isBlank() || preview.equals(title) ? safeTitle : preview,
+                    firstUserInput,
+                    sandboxMode,
+                    approvalMode,
+                    gitSha,
+                    gitBranch,
+                    gitOriginUrl,
+                    cliVersion,
                     ephemeral,
                     modelProvider,
                     model,
@@ -535,13 +633,28 @@ public class InMemoryConversationStore implements ConversationStore {
                     new ArrayList<>(turns));
         }
 
-        private ThreadRecord withMetadata(String newCwd, String newModelProvider, String newModel) {
+        private ThreadRecord withMetadata(String newCwd,
+                                          String newModelProvider,
+                                          String newModel,
+                                          String newSandboxMode,
+                                          String newApprovalMode,
+                                          String newGitSha,
+                                          String newGitBranch,
+                                          String newGitOriginUrl,
+                                          String newCliVersion) {
             return new ThreadRecord(
                     title,
                     threadId,
                     createdAt,
                     Instant.now(),
                     preview,
+                    firstUserInput,
+                    normalizeText(newSandboxMode, sandboxMode),
+                    normalizeText(newApprovalMode, approvalMode),
+                    normalizeText(newGitSha, gitSha),
+                    normalizeText(newGitBranch, gitBranch),
+                    normalizeText(newGitOriginUrl, gitOriginUrl),
+                    normalizeText(newCliVersion, cliVersion),
                     ephemeral,
                     normalizeText(newModelProvider, modelProvider),
                     normalizeText(newModel, model),
@@ -572,6 +685,13 @@ public class InMemoryConversationStore implements ConversationStore {
                 record.updatedAt(),
                 record.turns().size(),
                 record.preview(),
+                record.firstUserInput(),
+                record.sandboxMode(),
+                record.approvalMode(),
+                record.gitSha(),
+                record.gitBranch(),
+                record.gitOriginUrl(),
+                record.cliVersion(),
                 record.ephemeral(),
                 record.modelProvider(),
                 record.model(),
@@ -599,6 +719,13 @@ public class InMemoryConversationStore implements ConversationStore {
                 now,
                 sourceSummary.turnCount(),
                 sourceSummary.preview(),
+                sourceSummary.firstUserInput(),
+                template.sandboxMode() == null ? sourceSummary.sandboxMode() : template.sandboxMode(),
+                template.approvalMode() == null ? sourceSummary.approvalMode() : template.approvalMode(),
+                sourceSummary.gitSha(),
+                sourceSummary.gitBranch(),
+                sourceSummary.gitOriginUrl(),
+                sourceSummary.cliVersion(),
                 template.ephemeral() == null ? sourceSummary.ephemeral() : template.ephemeral(),
                 template.modelProvider() == null ? sourceSummary.modelProvider() : template.modelProvider(),
                 template.model() == null ? sourceSummary.model() : template.model(),

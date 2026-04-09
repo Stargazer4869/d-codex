@@ -20,3 +20,11 @@ codex:
   model:
     context-window: ${CODEX_CONTEXT_WINDOW:272000}
     auto-compact-token-limit: ${CODEX_AUTO_COMPACT_TOKEN_LIMIT:200000}
+  prompt:
+    project-doc-max-bytes: ${CODEX_PROJECT_DOC_MAX_BYTES:32768}
+    base-instructions-text: ${CODEX_BASE_INSTRUCTIONS_TEXT:}
+    base-instructions-file: ${CODEX_BASE_INSTRUCTIONS_FILE:}
+    project-instructions-text: ${CODEX_PROJECT_INSTRUCTIONS_TEXT:}
+    project-instructions-file: ${CODEX_PROJECT_INSTRUCTIONS_FILE:}
+    user-instructions-text: ${CODEX_USER_INSTRUCTIONS_TEXT:}
+    user-instructions-file: ${CODEX_USER_INSTRUCTIONS_FILE:}

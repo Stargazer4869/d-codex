@@ -17,6 +17,22 @@ import org.dean.codex.runtime.springai.context.SpringAiThreadCompactionSummarize
 import org.dean.codex.runtime.springai.context.ThreadCompactionSummarizer;
 import org.dean.codex.runtime.springai.conversation.FileSystemConversationStore;
 import org.dean.codex.runtime.springai.history.FileSystemThreadHistoryStore;
+import org.dean.codex.runtime.springai.prompt.BaseInstructionsResolver;
+import org.dean.codex.runtime.springai.prompt.DefaultBaseInstructionsResolver;
+import org.dean.codex.runtime.springai.prompt.DefaultPromptAssemblyService;
+import org.dean.codex.runtime.springai.prompt.DefaultPromptOutputContractRenderer;
+import org.dean.codex.runtime.springai.prompt.DefaultThreadPromptSnapshotResolver;
+import org.dean.codex.runtime.springai.prompt.DefaultToolContractPromptRenderer;
+import org.dean.codex.runtime.springai.prompt.DefaultToolContractResolver;
+import org.dean.codex.runtime.springai.prompt.DefaultUserInstructionsResolver;
+import org.dean.codex.runtime.springai.prompt.FileSystemThreadPromptStateStore;
+import org.dean.codex.runtime.springai.prompt.PromptAssemblyService;
+import org.dean.codex.runtime.springai.prompt.PromptOutputContractRenderer;
+import org.dean.codex.runtime.springai.prompt.ThreadPromptSnapshotResolver;
+import org.dean.codex.runtime.springai.prompt.ThreadPromptStateStore;
+import org.dean.codex.runtime.springai.prompt.ToolContractPromptRenderer;
+import org.dean.codex.runtime.springai.prompt.ToolContractResolver;
+import org.dean.codex.runtime.springai.prompt.UserInstructionsResolver;
 import org.dean.codex.runtime.springai.skills.FileSystemSkillService;
 import org.dean.codex.tools.local.PatternCommandApprovalPolicy;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -91,6 +107,73 @@ public class CodexRuntimeSpringAiConfig {
     @Bean
     public ThreadCompactionSummarizer threadCompactionSummarizer(ChatClient.Builder chatClientBuilder) {
         return new SpringAiThreadCompactionSummarizer(chatClientBuilder);
+    }
+
+    @Bean
+    public BaseInstructionsResolver baseInstructionsResolver(@org.springframework.beans.factory.annotation.Qualifier("codexWorkspaceRoot") Path workspaceRoot,
+                                                             CodexProperties properties) {
+        return new DefaultBaseInstructionsResolver(
+                workspaceRoot,
+                properties.getPrompt().getBaseInstructionsText(),
+                properties.getPrompt().getBaseInstructionsFile());
+    }
+
+    @Bean
+    public PromptOutputContractRenderer promptOutputContractRenderer() {
+        return new DefaultPromptOutputContractRenderer();
+    }
+
+    @Bean
+    public UserInstructionsResolver userInstructionsResolver(@org.springframework.beans.factory.annotation.Qualifier("codexWorkspaceRoot") Path workspaceRoot,
+                                                             CodexProperties properties) {
+        return new DefaultUserInstructionsResolver(
+                workspaceRoot,
+                properties.getPrompt().getProjectDocMaxBytes(),
+                properties.getPrompt().getProjectInstructionsText(),
+                properties.getPrompt().getProjectInstructionsFile(),
+                properties.getPrompt().getUserInstructionsText(),
+                properties.getPrompt().getUserInstructionsFile());
+    }
+
+    @Bean
+    public ThreadPromptSnapshotResolver threadPromptSnapshotResolver(BaseInstructionsResolver baseInstructionsResolver,
+                                                                    UserInstructionsResolver userInstructionsResolver) {
+        return new DefaultThreadPromptSnapshotResolver(baseInstructionsResolver, userInstructionsResolver);
+    }
+
+    @Bean
+    public ThreadPromptStateStore threadPromptStateStore(ConversationStore conversationStore,
+                                                         @org.springframework.beans.factory.annotation.Qualifier("codexStorageRoot") Path storageRoot) {
+        return new FileSystemThreadPromptStateStore(conversationStore, storageRoot);
+    }
+
+    @Bean
+    public ToolContractResolver toolContractResolver() {
+        return new DefaultToolContractResolver();
+    }
+
+    @Bean
+    public ToolContractPromptRenderer toolContractPromptRenderer() {
+        return new DefaultToolContractPromptRenderer();
+    }
+
+    @Bean
+    public PromptAssemblyService promptAssemblyService(BaseInstructionsResolver baseInstructionsResolver,
+                                                       UserInstructionsResolver userInstructionsResolver,
+                                                       ThreadPromptStateStore threadPromptStateStore,
+                                                       ToolContractResolver toolContractResolver,
+                                                       ToolContractPromptRenderer toolContractPromptRenderer,
+                                                       PromptOutputContractRenderer promptOutputContractRenderer,
+                                                        CodexProperties properties) {
+        return new DefaultPromptAssemblyService(
+                baseInstructionsResolver,
+                userInstructionsResolver,
+                threadPromptStateStore,
+                toolContractResolver,
+                toolContractPromptRenderer,
+                promptOutputContractRenderer,
+                properties.getAgent().getMaxSteps(),
+                properties.getAgent().getMaxActionsPerStep());
     }
 
     @Bean

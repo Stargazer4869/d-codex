@@ -12,6 +12,7 @@ import org.dean.codex.protocol.agent.AgentMessage;
 import org.dean.codex.protocol.agent.AgentMailboxState;
 import org.dean.codex.protocol.agent.AgentSpawnRequest;
 import org.dean.codex.protocol.agent.AgentStatus;
+import org.dean.codex.protocol.agent.AgentSummary;
 import org.dean.codex.core.skill.ResolvedSkill;
 import org.dean.codex.core.skill.SkillService;
 import org.dean.codex.protocol.appserver.ThreadForkParams;
@@ -39,6 +40,8 @@ import org.dean.codex.protocol.skill.SkillScope;
 import org.dean.codex.runtime.springai.context.DefaultThreadContextReconstructionService;
 import org.dean.codex.runtime.springai.history.InMemoryThreadHistoryStore;
 import org.dean.codex.runtime.springai.history.ThreadHistoryMapper;
+import org.dean.codex.runtime.springai.prompt.ThreadPromptSnapshot;
+import org.dean.codex.runtime.springai.prompt.ThreadPromptStateStore;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -48,10 +51,12 @@ import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -129,6 +134,49 @@ class DefaultCodexRuntimeGatewayTest {
     }
 
     @Test
+    void listThreadsUsesCachedSnapshotUntilAThreadMutationInvalidatesIt() {
+        CountingConversationStore store = new CountingConversationStore();
+        ThreadId threadId = store.createThread("Gateway thread");
+        store.updateThreadMetadata(
+                threadId,
+                "/workspace",
+                "openai",
+                "gpt-5.4",
+                null,
+                null,
+                "1234567890abcdef",
+                "main",
+                "git@github.com:org/repo.git",
+                "1.0-SNAPSHOT");
+        CodexRuntimeGateway gateway = new DefaultCodexRuntimeGateway(
+                store,
+                new CompletingTurnExecutor(store),
+                new NoOpContextManager(),
+                new NoOpThreadContextReconstructionService(),
+                new NoOpSkillService());
+
+        assertEquals(0, store.listThreadsCalls.get());
+
+        gateway.listThreads();
+        gateway.listThreads();
+
+        assertEquals(1, store.listThreadsCalls.get());
+        ThreadSummary cachedSummary = gateway.listThreads().get(0);
+        assertEquals("1234567890abcdef", cachedSummary.gitSha());
+        assertEquals("main", cachedSummary.gitBranch());
+        assertEquals("git@github.com:org/repo.git", cachedSummary.gitOriginUrl());
+
+        int scansBeforeMutation = store.listThreadsCalls.get();
+        gateway.threadArchive(threadId);
+        int scansAfterMutation = store.listThreadsCalls.get();
+
+        gateway.listThreads();
+
+        assertTrue(store.listThreadsCalls.get() > scansAfterMutation);
+        assertTrue(scansAfterMutation >= scansBeforeMutation);
+    }
+
+    @Test
     void threadRollbackTrimsCanonicalHistoryUsedForReconstruction() {
         ConversationStore conversationStore = new InMemoryConversationStore();
         InMemoryThreadHistoryStore historyStore = new InMemoryThreadHistoryStore();
@@ -171,6 +219,93 @@ class DefaultCodexRuntimeGatewayTest {
                 reconstructed.recentMessages().stream().map(message -> message.content()).toList());
         assertEquals(2, historyStore.read(threadId).size());
         assertTrue(historyStore.read(threadId).stream().allMatch(item -> firstTurnId.equals(item.turnId())));
+    }
+
+    @Test
+    void threadStartPersistsCurrentPromptSnapshotAndForkCopiesIt() {
+        ConversationStore store = new InMemoryConversationStore();
+        InMemoryThreadPromptStateStore promptStateStore = new InMemoryThreadPromptStateStore();
+        ThreadPromptSnapshot snapshot = new ThreadPromptSnapshot(
+                "Base instructions",
+                List.of("Project instructions:\nStay focused."),
+                Instant.parse("2026-04-09T00:00:00Z"));
+        DefaultCodexRuntimeGateway gateway = new DefaultCodexRuntimeGateway(
+                store,
+                new CompletingTurnExecutor(store),
+                new NoOpContextManager(),
+                new NoOpThreadContextReconstructionService(),
+                null,
+                new NoOpSkillService(),
+                promptStateStore,
+                () -> snapshot,
+                4);
+
+        ThreadSummary started = gateway.threadStart("Prompt thread");
+        ThreadSummary forked = gateway.threadFork(new ThreadForkParams(
+                started.threadId(),
+                "Forked prompt thread",
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null));
+
+        assertEquals(snapshot, promptStateStore.read(started.threadId()).orElseThrow());
+        ThreadPromptSnapshot forkedSnapshot = promptStateStore.read(forked.threadId()).orElseThrow();
+        assertEquals(snapshot.baseInstructions(), forkedSnapshot.baseInstructions());
+        assertEquals(snapshot.userInstructions(), forkedSnapshot.userInstructions());
+        assertEquals(started.threadId(), forkedSnapshot.inheritedFromThreadId());
+        assertNotNull(started.promptState());
+        assertEquals(1, started.promptState().userInstructionSectionCount());
+        org.junit.jupiter.api.Assertions.assertNull(started.promptState().inheritedFromThreadId());
+        assertNotNull(forked.promptState());
+        assertEquals(started.threadId(), forked.promptState().inheritedFromThreadId());
+    }
+
+    @Test
+    void spawnAgentCopiesParentPromptSnapshotToChild() {
+        ConversationStore store = new InMemoryConversationStore();
+        InMemoryThreadPromptStateStore promptStateStore = new InMemoryThreadPromptStateStore();
+        DefaultCodexRuntimeGateway gateway = new DefaultCodexRuntimeGateway(
+                store,
+                new CompletingTurnExecutor(store),
+                new NoOpContextManager(),
+                new NoOpThreadContextReconstructionService(),
+                null,
+                new NoOpSkillService(),
+                promptStateStore,
+                () -> new ThreadPromptSnapshot(
+                        "Base instructions",
+                        List.of("Project instructions:\nStay focused."),
+                        Instant.parse("2026-04-09T00:00:00Z")),
+                4);
+        ThreadSummary parent = gateway.threadStart("Parent thread");
+        ThreadPromptSnapshot snapshot = promptStateStore.read(parent.threadId()).orElseThrow();
+
+        AgentSummary child = gateway.spawnAgent(new AgentSpawnRequest(
+                parent.threadId(),
+                "worker-task",
+                "Inspect the module",
+                null,
+                null,
+                null,
+                null,
+                "worker-1",
+                "worker"));
+
+        ThreadPromptSnapshot childSnapshot = promptStateStore.read(child.threadId()).orElseThrow();
+        assertEquals(snapshot.baseInstructions(), childSnapshot.baseInstructions());
+        assertEquals(snapshot.userInstructions(), childSnapshot.userInstructions());
+        assertEquals(parent.threadId(), childSnapshot.inheritedFromThreadId());
+        ThreadSummary childSummary = gateway.listThreads().stream()
+                .filter(summary -> summary.threadId().equals(child.threadId()))
+                .findFirst()
+                .orElseThrow();
+        assertNotNull(childSummary.promptState());
+        assertEquals(parent.threadId(), childSummary.promptState().inheritedFromThreadId());
     }
 
     @Test
@@ -714,6 +849,17 @@ class DefaultCodexRuntimeGatewayTest {
         }
     }
 
+    private static final class CountingConversationStore extends InMemoryConversationStore {
+
+        private final AtomicInteger listThreadsCalls = new AtomicInteger();
+
+        @Override
+        public synchronized List<ThreadSummary> listThreads() {
+            listThreadsCalls.incrementAndGet();
+            return super.listThreads();
+        }
+    }
+
     private static void awaitAgentStatus(DefaultCodexRuntimeGateway gateway, ThreadId threadId, AgentStatus expectedStatus) {
         long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
         while (System.nanoTime() < deadlineNanos) {
@@ -942,6 +1088,22 @@ class DefaultCodexRuntimeGatewayTest {
         @Override
         public ReconstructedThreadContext reconstruct(ThreadId threadId) {
             return reconstructedThreadContext;
+        }
+    }
+
+    private static final class InMemoryThreadPromptStateStore implements ThreadPromptStateStore {
+
+        private final java.util.Map<ThreadId, ThreadPromptSnapshot> snapshots = new java.util.HashMap<>();
+
+        @Override
+        public Optional<ThreadPromptSnapshot> read(ThreadId threadId) {
+            return Optional.ofNullable(snapshots.get(threadId));
+        }
+
+        @Override
+        public ThreadPromptSnapshot write(ThreadId threadId, ThreadPromptSnapshot snapshot) {
+            snapshots.put(threadId, snapshot);
+            return snapshot;
         }
     }
 }
