@@ -6,6 +6,23 @@ import org.dean.codex.core.appserver.CodexAppServerSession;
 import org.dean.codex.core.conversation.ConversationStore;
 import org.dean.codex.core.conversation.InMemoryConversationStore;
 import org.dean.codex.protocol.appserver.AppServerNotification;
+import org.dean.codex.protocol.appserver.AgentCloseParams;
+import org.dean.codex.protocol.appserver.AgentCloseResponse;
+import org.dean.codex.protocol.appserver.AgentAssignTaskParams;
+import org.dean.codex.protocol.appserver.AgentAssignTaskResponse;
+import org.dean.codex.protocol.appserver.AgentListParams;
+import org.dean.codex.protocol.appserver.AgentListResponse;
+import org.dean.codex.protocol.appserver.AgentResumeParams;
+import org.dean.codex.protocol.appserver.AgentResumeResponse;
+import org.dean.codex.protocol.appserver.AgentSendInputParams;
+import org.dean.codex.protocol.appserver.AgentSendInputResponse;
+import org.dean.codex.protocol.appserver.AgentSendMessageParams;
+import org.dean.codex.protocol.appserver.AgentSendMessageResponse;
+import org.dean.codex.protocol.appserver.AgentSpawnParams;
+import org.dean.codex.protocol.appserver.AgentSpawnResponse;
+import org.dean.codex.protocol.appserver.AgentWaitParams;
+import org.dean.codex.protocol.appserver.AgentWaitResponse;
+import org.dean.codex.protocol.appserver.AgentMailboxUpdatedNotification;
 import org.dean.codex.protocol.appserver.InitializeParams;
 import org.dean.codex.protocol.appserver.InitializeResponse;
 import org.dean.codex.protocol.appserver.InitializedNotification;
@@ -13,6 +30,8 @@ import org.dean.codex.protocol.appserver.SkillsListParams;
 import org.dean.codex.protocol.appserver.SkillsListResponse;
 import org.dean.codex.protocol.appserver.ThreadArchiveParams;
 import org.dean.codex.protocol.appserver.ThreadArchiveResponse;
+import org.dean.codex.protocol.appserver.ThreadBackgroundTerminalsCleanParams;
+import org.dean.codex.protocol.appserver.ThreadBackgroundTerminalsCleanResponse;
 import org.dean.codex.protocol.appserver.ThreadCompaction;
 import org.dean.codex.protocol.appserver.ThreadCompactStartParams;
 import org.dean.codex.protocol.appserver.ThreadCompactStartResponse;
@@ -24,6 +43,10 @@ import org.dean.codex.protocol.appserver.ThreadListParams;
 import org.dean.codex.protocol.appserver.ThreadListResponse;
 import org.dean.codex.protocol.appserver.ThreadLoadedListParams;
 import org.dean.codex.protocol.appserver.ThreadLoadedListResponse;
+import org.dean.codex.protocol.appserver.ThreadMetadataUpdateParams;
+import org.dean.codex.protocol.appserver.ThreadMetadataUpdateResponse;
+import org.dean.codex.protocol.appserver.ThreadNameSetParams;
+import org.dean.codex.protocol.appserver.ThreadNameSetResponse;
 import org.dean.codex.protocol.appserver.ThreadReadParams;
 import org.dean.codex.protocol.appserver.ThreadReadResponse;
 import org.dean.codex.protocol.appserver.ThreadRollbackParams;
@@ -33,8 +56,12 @@ import org.dean.codex.protocol.appserver.ThreadResumeResponse;
 import org.dean.codex.protocol.appserver.ThreadStartParams;
 import org.dean.codex.protocol.appserver.ThreadStartResponse;
 import org.dean.codex.protocol.appserver.ThreadStartedNotification;
+import org.dean.codex.protocol.appserver.ThreadShellCommandParams;
+import org.dean.codex.protocol.appserver.ThreadShellCommandResponse;
 import org.dean.codex.protocol.appserver.ThreadUnarchiveParams;
 import org.dean.codex.protocol.appserver.ThreadUnarchiveResponse;
+import org.dean.codex.protocol.appserver.ThreadUnsubscribeParams;
+import org.dean.codex.protocol.appserver.ThreadUnsubscribeResponse;
 import org.dean.codex.protocol.appserver.TurnCompletedNotification;
 import org.dean.codex.protocol.appserver.TurnStartedNotification;
 import org.dean.codex.protocol.appserver.TurnInterruptParams;
@@ -51,6 +78,12 @@ import org.dean.codex.protocol.approval.ApprovalId;
 import org.dean.codex.protocol.approval.ApprovalStatus;
 import org.dean.codex.protocol.approval.CommandApprovalRequest;
 import org.dean.codex.protocol.agent.AgentStatus;
+import org.dean.codex.protocol.agent.AgentMailboxState;
+import org.dean.codex.protocol.agent.AgentSummary;
+import org.dean.codex.protocol.agent.AgentWaitResult;
+import org.dean.codex.protocol.agent.AgentSpawnRequest;
+import org.dean.codex.protocol.agent.AgentMessage;
+import org.dean.codex.protocol.agent.AgentMailboxState;
 import org.dean.codex.protocol.context.ReconstructedThreadContext;
 import org.dean.codex.protocol.context.ThreadMemory;
 import org.dean.codex.protocol.conversation.ThreadId;
@@ -63,6 +96,8 @@ import org.dean.codex.protocol.skill.SkillMetadata;
 import org.dean.codex.protocol.skill.SkillScope;
 import org.dean.codex.protocol.item.ToolCallItem;
 import org.dean.codex.protocol.item.ToolResultItem;
+import org.dean.codex.protocol.item.CollabToolCallItem;
+import org.dean.codex.protocol.item.CollabToolCallStatus;
 import org.dean.codex.protocol.tool.CommandApprovalDecision;
 import org.dean.codex.protocol.tool.ShellCommandResult;
 import org.junit.jupiter.api.Test;
@@ -71,17 +106,22 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CodexConsoleRunnerTest {
@@ -202,8 +242,51 @@ class CodexConsoleRunnerTest {
 
         CapturedRun captured = captureRun(() -> runner.run(), "inspect repo\n");
 
+        assertTrue(captured.stdout().contains("[collab:inProgress] spawn agent"));
+        assertTrue(captured.stdout().contains("[collab:completed] spawn agent"));
+        assertTrue(captured.stdout().contains("[collab:completed] wait agent"));
+        assertTrue(captured.stdout().contains("wake=mailbox_updated"));
+        assertTrue(captured.stdout().contains("mailbox["));
+        assertFalse(captured.stdout().contains("[mailbox]"));
         assertTrue(captured.stdout().contains("[tool:start] run command -> ls -la"));
         assertTrue(captured.stdout().contains("[tool:done] run command -> success=true exitCode=0"));
+    }
+
+    @Test
+    void plainInputWhileTurnActiveSteersInsteadOfStartingNewTurn() throws Exception {
+        StubAppServer runtime = new StubAppServer(true, false, true, true, true, false);
+        CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());
+
+        CapturedRun captured = captureRun(() -> runner.run(), "inspect repo\nfollow up\n");
+
+        assertEquals(1, runtime.turnStartCount());
+        assertEquals(1, runtime.turnSteerCount());
+        assertTrue(runtime.steeredInputs().contains("follow up"));
+        assertTrue(captured.stdout().contains("handled: inspect repo"));
+    }
+
+    @Test
+    void staleSteerStateFallsBackToStartingANewTurn() throws Exception {
+        StubAppServer runtime = new StubAppServer(true, false, false, true, false, true);
+        CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());
+
+        CapturedRun captured = captureRun(() -> runner.run(), "inspect repo\nfollow up\n");
+
+        assertEquals(2, runtime.turnStartCount());
+        assertEquals(1, runtime.turnSteerCount());
+        assertTrue(captured.stdout().contains("handled: follow up"));
+    }
+
+    @Test
+    void activeButUnsteerableTurnDoesNotSilentlyStartANewTurn() throws Exception {
+        StubAppServer runtime = new StubAppServer(true, false, false, true, false, false);
+        CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());
+
+        CapturedRun captured = captureRun(() -> runner.run(), "inspect repo\nfollow up\n");
+
+        assertEquals(1, runtime.turnStartCount());
+        assertEquals(1, runtime.turnSteerCount());
+        assertTrue(captured.stdout().contains("Active turn is not steerable yet."));
     }
 
     @Test
@@ -213,6 +296,8 @@ class CodexConsoleRunnerTest {
         String console = captureConsole(() -> assertTrue(runner.handleConsoleCommand("/help")));
         assertTrue(console.contains("Interactive commands use /command syntax"));
         assertTrue(console.contains("/threads [all|loaded|archived]"));
+        assertTrue(console.contains("Plain input steers an active regular turn"));
+        assertFalse(console.contains("/steer"));
     }
 
     @Test
@@ -245,6 +330,33 @@ class CodexConsoleRunnerTest {
         String console = output.toString(StandardCharsets.UTF_8);
         assertTrue(console.contains("Approved command"));
         assertTrue(console.contains("resumed turn"));
+    }
+
+    @Test
+    void approveCommandDoesNotBlockOnTurnCompletion() throws Exception {
+        StubAppServer runtime = new StubAppServer(true, false, false, false, true, false, true);
+        CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());
+
+        assertTimeoutPreemptively(Duration.ofMillis(250), () -> {
+            String console = captureConsole(() -> assertTrue(runner.handleConsoleCommand("/approve approval-")));
+            assertTrue(console.contains("Approved command"));
+        });
+
+        assertEquals(1, runtime.turnResumeCount());
+    }
+
+    @Test
+    void slashCommandsCanRunWhileTurnIsActiveAndInputStillSteers() throws Exception {
+        StubAppServer runtime = new StubAppServer(true, false, false, true, true, false);
+        CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());
+
+        CapturedRun captured = captureRun(() -> runner.run(), "inspect repo\n/history\nfollow up\n");
+
+        assertEquals(1, runtime.turnStartCount());
+        assertEquals(1, runtime.turnSteerCount());
+        assertTrue(runtime.steeredInputs().contains("follow up"));
+        assertTrue(captured.stdout().contains("[memory]"));
+        assertTrue(captured.stdout().contains("USER: inspect repo"));
     }
 
     @Test
@@ -343,6 +455,21 @@ class CodexConsoleRunnerTest {
         assertEquals(runtime.subagentThreadId(), runner.getActiveThreadIdForTest());
         assertTrue(captured.stdout().contains("Codex CLI. Active thread"));
         assertTrue(captured.stdout().contains(shortId(runtime.subagentThreadId())));
+    }
+
+    @Test
+    void resumedThreadStartsFreshTurnForFirstPlainPrompt() throws Exception {
+        StubAppServer runtime = new StubAppServer();
+        runtime.addRunningTurn(runtime.subagentThreadId(), "stale running turn");
+        CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());
+
+        CapturedRun captured = captureRun(
+                () -> runner.run("resume", shortId(runtime.subagentThreadId())),
+                "Take a look around, what do you see\nexit\n");
+
+        assertEquals(1, runtime.turnStartCount());
+        assertEquals(0, runtime.turnSteerCount());
+        assertTrue(captured.stdout().contains("handled: Take a look around, what do you see"));
     }
 
     @Test
@@ -493,25 +620,58 @@ class CodexConsoleRunnerTest {
         private final ThreadId subagentThreadId;
         private final boolean failResumeForExistingThreads;
         private final boolean emitToolActivity;
+        private final boolean delayedTurnCompletion;
+        private final boolean delayedTurnResumeCompletion;
+        private final boolean steerAccepted;
+        private final boolean completeOnSteerFailure;
+        private final Set<TurnId> runningTurnIds = ConcurrentHashMap.newKeySet();
+        private final CopyOnWriteArrayList<String> steeredInputs = new CopyOnWriteArrayList<>();
+        private final AtomicInteger turnStartCount = new AtomicInteger();
+        private final AtomicInteger turnSteerCount = new AtomicInteger();
+        private final AtomicInteger turnResumeCount = new AtomicInteger();
         private int connectCount;
         private int resumeAttemptCount;
         private ThreadForkParams lastForkParams;
 
         private StubAppServer() {
-            this(true, false, false);
+            this(true, false, false, false, true, false);
         }
 
         private StubAppServer(boolean preloadThreadsAsLoaded, boolean failResumeForExistingThreads) {
-            this(preloadThreadsAsLoaded, failResumeForExistingThreads, false);
+            this(preloadThreadsAsLoaded, failResumeForExistingThreads, false, false, true, false);
         }
 
         private StubAppServer(boolean preloadThreadsAsLoaded,
                               boolean failResumeForExistingThreads,
                               boolean emitToolActivity) {
+            this(preloadThreadsAsLoaded, failResumeForExistingThreads, emitToolActivity, false, true, false);
+        }
+
+        private StubAppServer(boolean preloadThreadsAsLoaded,
+                              boolean failResumeForExistingThreads,
+                              boolean emitToolActivity,
+                              boolean delayedTurnCompletion,
+                              boolean steerAccepted,
+                              boolean completeOnSteerFailure) {
+            this(preloadThreadsAsLoaded, failResumeForExistingThreads, emitToolActivity, delayedTurnCompletion,
+                    steerAccepted, completeOnSteerFailure, false);
+        }
+
+        private StubAppServer(boolean preloadThreadsAsLoaded,
+                              boolean failResumeForExistingThreads,
+                              boolean emitToolActivity,
+                              boolean delayedTurnCompletion,
+                              boolean steerAccepted,
+                              boolean completeOnSteerFailure,
+                              boolean delayedTurnResumeCompletion) {
             this.rootThreadId = store.createThread("Thread 1");
             this.subagentThreadId = store.createThread("Worker thread");
             this.failResumeForExistingThreads = failResumeForExistingThreads;
             this.emitToolActivity = emitToolActivity;
+            this.delayedTurnCompletion = delayedTurnCompletion;
+            this.delayedTurnResumeCompletion = delayedTurnResumeCompletion;
+            this.steerAccepted = steerAccepted;
+            this.completeOnSteerFailure = completeOnSteerFailure;
             if (preloadThreadsAsLoaded) {
                 loadedThreadIds.add(rootThreadId);
                 loadedThreadIds.add(subagentThreadId);
@@ -533,8 +693,28 @@ class CodexConsoleRunnerTest {
             store.completeTurn(threadId, turnId, TurnStatus.COMPLETED, "handled: " + input, now.plusSeconds(1));
         }
 
+        private TurnId addRunningTurn(ThreadId threadId, String input) {
+            return store.startTurn(threadId, input, Instant.now());
+        }
+
         private int turnCount(ThreadId threadId) {
             return store.turns(threadId).size();
+        }
+
+        private int turnStartCount() {
+            return turnStartCount.get();
+        }
+
+        private int turnSteerCount() {
+            return turnSteerCount.get();
+        }
+
+        private int turnResumeCount() {
+            return turnResumeCount.get();
+        }
+
+        private List<String> steeredInputs() {
+            return List.copyOf(steeredInputs);
         }
 
         private int connectCount() {
@@ -715,6 +895,174 @@ class CodexConsoleRunnerTest {
             }
 
             @Override
+            public ThreadUnsubscribeResponse threadUnsubscribe(ThreadUnsubscribeParams params) {
+                ensureReady();
+                ThreadId threadId = params.threadId();
+                loadedThreadIds.remove(threadId);
+                return new ThreadUnsubscribeResponse("unsubscribed");
+            }
+
+            @Override
+            public ThreadNameSetResponse threadNameSet(ThreadNameSetParams params) {
+                ensureReady();
+                store.renameThread(params.threadId(), params.title());
+                return new ThreadNameSetResponse();
+            }
+
+            @Override
+            public ThreadMetadataUpdateResponse threadMetadataUpdate(ThreadMetadataUpdateParams params) {
+                ensureReady();
+                ThreadSummary updated = store.updateThreadMetadata(
+                        params.threadId(),
+                        params.cwd(),
+                        params.modelProvider(),
+                        params.model());
+                return new ThreadMetadataUpdateResponse(runtimeSummary(updated));
+            }
+
+            @Override
+            public ThreadShellCommandResponse threadShellCommand(ThreadShellCommandParams params) {
+                ensureReady();
+                return new ThreadShellCommandResponse(new ShellCommandResult(
+                        true,
+                        params.command(),
+                        0,
+                        "shell output",
+                        "",
+                        false,
+                        "/tmp/workspace",
+                        true,
+                        CommandApprovalDecision.ALLOW,
+                        "allowed",
+                        ""));
+            }
+
+            @Override
+            public ThreadBackgroundTerminalsCleanResponse threadBackgroundTerminalsClean(ThreadBackgroundTerminalsCleanParams params) {
+                ensureReady();
+                return new ThreadBackgroundTerminalsCleanResponse(params.threadId(), 0);
+            }
+
+            @Override
+            public AgentSpawnResponse agentSpawn(AgentSpawnParams params) {
+                ensureReady();
+                return new AgentSpawnResponse(new AgentSummary(
+                        new ThreadId("agent-1"),
+                        params == null || params.request() == null ? null : params.request().parentThreadId(),
+                        "worker",
+                        "explorer",
+                        "src/demo",
+                        1,
+                        AgentStatus.IDLE,
+                        Instant.now(),
+                        Instant.now(),
+                        null));
+            }
+
+            @Override
+            public AgentSendInputResponse agentSendInput(AgentSendInputParams params) {
+                return new AgentSendInputResponse(agentAssignTask(new AgentAssignTaskParams(
+                        params.agentThreadId(),
+                        params.message(),
+                        params.interrupt())).agent());
+            }
+
+            @Override
+            public AgentSendMessageResponse agentSendMessage(AgentSendMessageParams params) {
+                ensureReady();
+                return new AgentSendMessageResponse(new AgentSummary(
+                        params.agentThreadId(),
+                        new ThreadId("thread-1"),
+                        "worker",
+                        "explorer",
+                        "src/demo",
+                        1,
+                        AgentStatus.IDLE,
+                        Instant.now(),
+                        Instant.now(),
+                        null));
+            }
+
+            @Override
+            public AgentAssignTaskResponse agentAssignTask(AgentAssignTaskParams params) {
+                ensureReady();
+                return new AgentAssignTaskResponse(new AgentSummary(
+                        params.agentThreadId(),
+                        new ThreadId("thread-1"),
+                        "worker",
+                        "explorer",
+                        "src/demo",
+                        1,
+                        AgentStatus.RUNNING,
+                        Instant.now(),
+                        Instant.now(),
+                        null));
+            }
+
+            @Override
+            public AgentWaitResponse agentWait(AgentWaitParams params) {
+                ensureReady();
+                return new AgentWaitResponse(new AgentWaitResult(
+                        params.agentThreadIds().isEmpty() ? null : params.agentThreadIds().get(0),
+                        null,
+                        AgentStatus.IDLE,
+                        AgentStatus.IDLE,
+                        false,
+                        "Agent is idle.",
+                        "",
+                        new AgentMailboxState(params.agentThreadIds().isEmpty() ? null : params.agentThreadIds().get(0), 0L, 0, Instant.parse("2026-03-31T00:00:02Z")),
+                        Instant.now()));
+            }
+
+            @Override
+            public AgentResumeResponse agentResume(AgentResumeParams params) {
+                ensureReady();
+                return new AgentResumeResponse(new AgentSummary(
+                        params.agentThreadId(),
+                        new ThreadId("thread-1"),
+                        "worker",
+                        "explorer",
+                        "src/demo",
+                        1,
+                        AgentStatus.IDLE,
+                        Instant.now(),
+                        Instant.now(),
+                        null));
+            }
+
+            @Override
+            public AgentCloseResponse agentClose(AgentCloseParams params) {
+                ensureReady();
+                return new AgentCloseResponse(new AgentSummary(
+                        params.agentThreadId(),
+                        new ThreadId("thread-1"),
+                        "worker",
+                        "explorer",
+                        "src/demo",
+                        1,
+                        AgentStatus.SHUTDOWN,
+                        Instant.now(),
+                        Instant.now(),
+                        Instant.now()));
+            }
+
+            @Override
+            public AgentListResponse agentList(AgentListParams params) {
+                ensureReady();
+                return new AgentListResponse(List.of(new AgentSummary(
+                        new ThreadId("agent-1"),
+                        new ThreadId("thread-1"),
+                        "worker",
+                        "explorer",
+                        "src/demo",
+                        1,
+                        AgentStatus.IDLE,
+                        Instant.now(),
+                        Instant.now(),
+                        null)));
+            }
+
+            @Override
             public ThreadRollbackResponse threadRollback(ThreadRollbackParams params) {
                 ensureReady();
                 return new ThreadRollbackResponse(
@@ -772,6 +1120,7 @@ class CodexConsoleRunnerTest {
             @Override
             public TurnStartResponse turnStart(TurnStartParams params) {
                 ensureReady();
+                turnStartCount.incrementAndGet();
                 ThreadId threadId = params.threadId();
                 if (!loadedThreadIds.contains(threadId)) {
                     throw new IllegalStateException("Thread is not loaded: " + threadId.value());
@@ -779,9 +1128,57 @@ class CodexConsoleRunnerTest {
                 String input = params.input();
                 Instant now = Instant.now();
                 TurnId turnId = store.startTurn(threadId, input, now);
+                runningTurnIds.add(turnId);
                 if (emitToolActivity) {
                     RuntimeTurn runningTurn = new RuntimeTurn(threadId, turnId, TurnStatus.RUNNING, now, null);
                     publish(threadId, new TurnStartedNotification(runningTurn));
+                    publish(threadId, new org.dean.codex.protocol.appserver.TurnItemNotification(
+                            runningTurn,
+                            new CollabToolCallItem(
+                                    new ItemId("collab-start-1"),
+                                    "spawn_agent",
+                                    CollabToolCallStatus.IN_PROGRESS,
+                                    org.dean.codex.protocol.item.CollabDeliveryState.DISPATCHED,
+                                    threadId,
+                                    List.of(),
+                                    null,
+                                    "inspect repository",
+                                    java.util.Map.of(),
+                                    java.util.Map.of(),
+                                    null,
+                                    now.plusMillis(1))));
+                    publish(threadId, new org.dean.codex.protocol.appserver.TurnItemNotification(
+                            runningTurn,
+                            new CollabToolCallItem(
+                                    new ItemId("collab-end-1"),
+                                    "spawn_agent",
+                                    CollabToolCallStatus.COMPLETED,
+                                    org.dean.codex.protocol.item.CollabDeliveryState.DISPATCHED,
+                                    threadId,
+                                    List.of(new ThreadId("agent-1")),
+                                    new ThreadId("agent-1"),
+                                    "inspect repository",
+                                    java.util.Map.of("agent-1", AgentStatus.IDLE),
+                                    java.util.Map.of("agent-1", new AgentMailboxState(new ThreadId("agent-1"), 1L, 1, now.plusMillis(1))),
+                                    "mailbox_updated",
+                                    now.plusMillis(1))));
+                    publish(threadId, new org.dean.codex.protocol.appserver.TurnItemNotification(
+                            runningTurn,
+                            new CollabToolCallItem(
+                                    new ItemId("collab-wait-1"),
+                                    "wait_agent",
+                                    CollabToolCallStatus.COMPLETED,
+                                    org.dean.codex.protocol.item.CollabDeliveryState.WAKEUP,
+                                    threadId,
+                                    List.of(new ThreadId("agent-1")),
+                                    null,
+                                    "wait_agent",
+                                    java.util.Map.of("agent-1", AgentStatus.IDLE),
+                                    java.util.Map.of("agent-1", new AgentMailboxState(new ThreadId("agent-1"), 2L, 0, now.plusMillis(2))),
+                                    "mailbox_updated",
+                                    now.plusMillis(2))));
+                    publish(threadId, new AgentMailboxUpdatedNotification(
+                            new AgentMailboxState(threadId, 1L, 1, now.plusMillis(1))));
                     publish(threadId, new org.dean.codex.protocol.appserver.TurnItemNotification(
                             runningTurn,
                             new ToolCallItem(new ItemId("tool-call-1"), "RUN_COMMAND", "ls -la", now.plusMillis(1))));
@@ -789,16 +1186,22 @@ class CodexConsoleRunnerTest {
                             runningTurn,
                             new ToolResultItem(new ItemId("tool-result-1"), "RUN_COMMAND", "success=true exitCode=0", now.plusMillis(2))));
                 }
-                store.completeTurn(threadId, turnId, TurnStatus.COMPLETED, "handled: " + input, now.plusSeconds(1));
-                publish(threadId, new TurnCompletedNotification(
-                        new RuntimeTurn(threadId, turnId, TurnStatus.COMPLETED, now, now.plusSeconds(1)),
-                        "handled: " + input));
+                if (delayedTurnCompletion) {
+                    Thread completionThread = new Thread(() -> completeTurnLater(threadId, turnId, now, input),
+                            "stub-turn-completion-" + turnId.value());
+                    completionThread.setDaemon(true);
+                    completionThread.start();
+                }
+                else {
+                    completeTurn(threadId, turnId, now, input);
+                }
                 return new TurnStartResponse(new RuntimeTurn(threadId, turnId, TurnStatus.RUNNING, now, null));
             }
 
             @Override
             public TurnResumeResponse turnResume(TurnResumeParams params) {
                 ensureReady();
+                turnResumeCount.incrementAndGet();
                 ThreadId threadId = params.threadId();
                 TurnId turnId = params.turnId();
                 Instant now = Instant.now();
@@ -815,10 +1218,34 @@ class CodexConsoleRunnerTest {
                     turnId = startedTurnId;
                 }
                 store.completeTurn(threadId, turnId, TurnStatus.COMPLETED, "resumed turn", now.plusSeconds(1));
-                publish(threadId, new TurnCompletedNotification(
-                        new RuntimeTurn(threadId, turnId, TurnStatus.COMPLETED, existingTurn.startedAt(), now.plusSeconds(1)),
-                        "resumed turn"));
-                return new TurnResumeResponse(new RuntimeTurn(threadId, turnId, TurnStatus.RUNNING, existingTurn.startedAt(), null));
+                Instant startedAt = existingTurn.startedAt();
+                Instant completedAt = now.plusSeconds(1);
+                final ThreadId resumedThreadId = threadId;
+                final TurnId resumedTurnId = turnId;
+                RuntimeTurn resumedTurn = new RuntimeTurn(threadId, turnId, TurnStatus.RUNNING, startedAt, null);
+                publish(threadId, new TurnStartedNotification(resumedTurn));
+                if (delayedTurnResumeCompletion) {
+                    Thread completionThread = new Thread(() -> {
+                        try {
+                            Thread.sleep(150);
+                        }
+                        catch (InterruptedException exception) {
+                            Thread.currentThread().interrupt();
+                            return;
+                        }
+                        publish(threadId, new TurnCompletedNotification(
+                                new RuntimeTurn(resumedThreadId, resumedTurnId, TurnStatus.COMPLETED, startedAt, completedAt),
+                                "resumed turn"));
+                    }, "stub-turn-resume-completion-" + turnId.value());
+                    completionThread.setDaemon(true);
+                    completionThread.start();
+                }
+                else {
+                    publish(threadId, new TurnCompletedNotification(
+                            new RuntimeTurn(resumedThreadId, resumedTurnId, TurnStatus.COMPLETED, startedAt, completedAt),
+                            "resumed turn"));
+                }
+                return new TurnResumeResponse(resumedTurn);
             }
 
             @Override
@@ -830,7 +1257,20 @@ class CodexConsoleRunnerTest {
             @Override
             public TurnSteerResponse turnSteer(TurnSteerParams params) {
                 ensureReady();
-                return new TurnSteerResponse(params.turnId(), true);
+                turnSteerCount.incrementAndGet();
+                steeredInputs.add(params.input());
+                if (steerAccepted) {
+                    return new TurnSteerResponse(params.turnId(), true);
+                }
+                if (completeOnSteerFailure && runningTurnIds.remove(params.turnId())) {
+                    ThreadId threadId = params.threadId();
+                    Instant now = Instant.now();
+                    store.completeTurn(threadId, params.turnId(), TurnStatus.COMPLETED, "handled: " + params.input(), now.plusSeconds(1));
+                    publish(threadId, new TurnCompletedNotification(
+                            new RuntimeTurn(threadId, params.turnId(), TurnStatus.COMPLETED, now, now.plusSeconds(1)),
+                            "handled: " + params.input()));
+                }
+                return new TurnSteerResponse(params.turnId(), false);
             }
 
             @Override
@@ -855,6 +1295,28 @@ class CodexConsoleRunnerTest {
                 for (Consumer<AppServerNotification> listener : listeners) {
                     listener.accept(notification);
                 }
+            }
+
+            private void completeTurn(ThreadId threadId, TurnId turnId, Instant startedAt, String input) {
+                if (!runningTurnIds.remove(turnId)) {
+                    return;
+                }
+                Instant completedAt = startedAt.plusSeconds(1);
+                store.completeTurn(threadId, turnId, TurnStatus.COMPLETED, "handled: " + input, completedAt);
+                publish(threadId, new TurnCompletedNotification(
+                        new RuntimeTurn(threadId, turnId, TurnStatus.COMPLETED, startedAt, completedAt),
+                        "handled: " + input));
+            }
+
+            private void completeTurnLater(ThreadId threadId, TurnId turnId, Instant startedAt, String input) {
+                try {
+                    TimeUnit.MILLISECONDS.sleep(150);
+                }
+                catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                completeTurn(threadId, turnId, startedAt, input);
             }
 
             private ThreadMemory latestThreadMemory(ThreadId threadId) {

@@ -15,7 +15,7 @@ class SlashCommandParserTest {
         SlashCommandRegistry registry = SlashCommandRegistry.defaultRegistry();
 
         assertIterableEquals(
-                List.of("help", "new", "threads", "resume", "fork", "archive", "unarchive", "rollback", "subagents", "agent", "skills", "history", "compact", "approvals", "approve", "reject", "interrupt", "steer"),
+                List.of("help", "new", "threads", "resume", "fork", "archive", "unarchive", "rollback", "subagents", "agent", "skills", "history", "compact", "approvals", "approve", "reject", "interrupt"),
                 registry.commands().stream().map(SlashCommandSpec::name).toList());
 
         SlashCommandSpec resume = registry.find("resume").orElseThrow();
@@ -56,6 +56,10 @@ class SlashCommandParserTest {
         assertTrue(unknown.isUnknownCommand());
         assertEquals("does-not-exist", unknown.commandToken().orElseThrow());
         assertEquals("one two", unknown.arguments());
+
+        SlashCommandParseResult steer = parser.parse("/steer please inspect this");
+        assertTrue(steer.isUnknownCommand());
+        assertEquals("steer", steer.commandToken().orElseThrow());
     }
 
     @Test

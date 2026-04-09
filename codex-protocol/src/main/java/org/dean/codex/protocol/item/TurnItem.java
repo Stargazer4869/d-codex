@@ -13,6 +13,7 @@ import java.time.Instant;
         @JsonSubTypes.Type(value = PlanItem.class, name = "plan"),
         @JsonSubTypes.Type(value = ToolCallItem.class, name = "toolCall"),
         @JsonSubTypes.Type(value = ToolResultItem.class, name = "toolResult"),
+        @JsonSubTypes.Type(value = CollabToolCallItem.class, name = "collabToolCall"),
         @JsonSubTypes.Type(value = SkillUseItem.class, name = "skillUse"),
         @JsonSubTypes.Type(value = ApprovalItem.class, name = "approval"),
         @JsonSubTypes.Type(value = RuntimeErrorItem.class, name = "runtimeError")
@@ -22,6 +23,7 @@ public sealed interface TurnItem permits UserMessageItem,
         PlanItem,
         ToolCallItem,
         ToolResultItem,
+        CollabToolCallItem,
         SkillUseItem,
         ApprovalItem,
         RuntimeErrorItem {

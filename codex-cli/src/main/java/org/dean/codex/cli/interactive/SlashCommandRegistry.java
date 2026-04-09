@@ -36,7 +36,6 @@ public final class SlashCommandRegistry {
                 .add(new SlashCommandSpec("approve", "/approve <approval-id-prefix>", "Approve a pending command", List.of(), true, true))
                 .add(new SlashCommandSpec("reject", "/reject <approval-id-prefix> [reason]", "Reject a pending command", List.of(), true, true))
                 .add(new SlashCommandSpec("interrupt", "/interrupt", "Interrupt the active turn", List.of(), false, true))
-                .add(new SlashCommandSpec("steer", "/steer <message>", "Send steering guidance to the active turn", List.of(), true, true))
                 .build();
     }
 

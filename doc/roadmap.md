@@ -8,7 +8,7 @@ These are the highest-value directions to close next. The goal is to keep the Ja
 
 ### 1. Non-blocking CLI interaction and steering
 
-This is the top priority because the current CLI interaction model still feels less like Codex and more like a synchronous shell wrapper around a runtime.
+This item is effectively complete for ordinary prompt usage. The CLI now stays interactive while a regular turn runs, treats plain input as steering, and keeps streamed output readable. The remaining synchronous paths are intentional lifecycle commands such as compaction and approval flows.
 
 #### Codex reference model
 
@@ -30,17 +30,18 @@ Reference points:
 
 #### Current Java state
 
-The Java runtime already has meaningful steering support:
+The Java runtime already has meaningful steering support, and the CLI now uses it in the normal interactive path:
 
 - `DefaultCodexRuntimeGateway.turnSteer(...)` accepts same-turn input.
 - `SpringAiCodexAgent` consumes steering between planner steps.
-- The CLI exposes `/steer`.
+- The CLI does not expose `/steer`; plain input steers an in-progress regular turn.
+- `CodexConsoleRunner.runInteractiveLoop(...)` keeps reading input while a turn is active.
+- streamed app-server notifications and prompt output coexist in the same terminal
 
-But the CLI interaction model is still synchronous:
+Explicit synchronous helpers still exist for intentional lifecycle flows:
 
-- `CodexConsoleRunner.runInteractiveLoop(...)` reads input through `Scanner`.
-- After prompt submission it enters `waitForTurn(...)`.
-- While waiting, the same terminal cannot naturally accept more user input.
+- compaction waits for its completion notifications
+- approval resume/reject flows remain direct, user-triggered actions
 
 Reference points:
 
@@ -50,18 +51,17 @@ Reference points:
 
 #### Main gap
 
-The backend is partially ready, but the user experience is still wrong:
+The main interactive gap is now small and intentional:
 
-- steering is real in the runtime but mostly unusable from the same interactive CLI session
-- the CLI is still "submit and block" instead of "submit and stay interactive"
-- normal input during an active turn does not naturally become steering
-- the client does not reconcile active-turn state the way Codex does
+- remaining synchronous paths are limited to explicit lifecycle commands, not ordinary prompt submission
+- the CLI is still line-oriented rather than a full TUI
+- prompt redraw can still be a little noisy under very chatty async output
 
 #### Implementation direction
 
-1. Replace synchronous `waitForTurn(...)` ownership of the terminal with an event-driven input/output loop.
-2. Keep one path subscribed to app-server notifications and rendering streamed updates.
-3. Keep another path reading user input while the turn is active.
+1. Keep the non-blocking interactive loop as the default prompt path.
+2. Preserve explicit synchronous helpers only for lifecycle-heavy flows that need them.
+3. Continue tightening prompt redraw and notification formatting when noisy async output appears.
 4. Treat plain input during an active regular turn as `turn/steer`.
 5. Treat plain input while idle as `turn/start`.
 6. Preserve explicit rejection for non-steerable turn kinds such as review or manual compaction.
@@ -92,6 +92,8 @@ Reference points:
 The Java app-server/runtime already supports:
 
 - `threadStart`, `threadResume`, `threadFork`, `threadArchive`, `threadUnarchive`, `threadRollback`, and `threadCompactStart`
+- `threadUnsubscribe`, `threadNameSet`, `threadMetadataUpdate`, and the first thread-scoped runtime service slice via `threadShellCommand`
+- `threadBackgroundTerminalsClean` as the explicit cleanup path for thread-owned background process state
 - persisted thread summaries with title, model, cwd/path, archive state, and agent lineage
 - thread tree navigation and related-thread reads
 
@@ -105,10 +107,13 @@ Reference points:
 
 The gap is no longer "can we persist sessions?" It is that our threads are still less operationally complete than Codex threads:
 
-- no `thread/unsubscribe` and weaker loaded/not-loaded lifecycle semantics
-- no `thread/name/set` or `thread/metadata/update`
+- `thread/unsubscribe`, `thread/name/set`, and minimal `thread/metadata/update` now exist, but the semantics are still smaller than Codex's full connection-scoped and metadata-rich model
+- `thread/unsubscribe` is now closer to connection-scoped behavior, but it still needs richer loaded-thread lifecycle and notification parity to feel like Codex
+- `thread/resume` now behaves more like a reattachment point, but loaded-thread/session attachment semantics are still simpler than Codex's
+- loaded/not-loaded lifecycle semantics are still weaker than Codex's
+- the first thread-scoped runtime service exists now (`thread/shellCommand`), and thread-owned background cleanup now exists, but full ownership/lifecycle tracking is still simpler than Codex
 - thinner metadata and weaker list/filter/index behavior
-- no thread-scoped shell command surface, background terminals, or realtime sessions
+- no realtime sessions yet
 - simpler reconstruction/rollback semantics than Codex rollout reconstruction
 
 #### Implementation direction
@@ -117,7 +122,7 @@ The gap is no longer "can we persist sessions?" It is that our threads are still
 2. Add thread naming and metadata patch operations.
 3. Expand `ThreadSummary` and backing persistence with approval/sandbox/model-effort/token/git metadata.
 4. Move toward stronger list/filter/index support over persisted threads.
-5. Add thread-scoped runtime services such as shell-command and background-terminal ownership only after the lifecycle model is solid.
+5. Add thread-scoped runtime services such as background-terminal ownership and realtime sessions after the lifecycle model is solid.
 
 ### 3. Multi-agent support
 
@@ -144,7 +149,10 @@ Reference points:
 The Java runtime already supports:
 
 - `spawnAgent`, `sendInput`, `waitAgent`, `resumeAgent`, `closeAgent`, and `listAgents`
+- app-server/protocol split for `agent/sendMessage` and `agent/assignTask`, with `agent/sendInput` kept as a compatibility alias
+- mailbox state now carries a monotonic sequence and pending-message count, and the app-server publishes `agent/mailbox/updated` when collaboration mail arrives
 - persisted sub-agent lineage in thread storage and thread summaries
+- app-server/protocol exposure for the existing multi-agent control primitives
 - CLI tree navigation for related agent threads
 
 Reference points:
@@ -158,20 +166,22 @@ Reference points:
 
 The current Java implementation has multi-agent mechanics, but not yet Codex-grade collaboration semantics:
 
-- multi-agent support is still more runtime-local than app-server/protocol-first
-- there is no strong split between `send_input`, `send_message`, and `assign_task`
-- waiting behavior is simpler than Codex mailbox-driven waiting
-- collaboration is not yet represented as first-class protocol items/events in the same way
+- delegation is still more runtime-local than collaboration-item-first
+- the runtime now exposes `send_message` and `assign_task`, and mailbox state is visible through `agent/mailbox/updated`, but `send_input` remains a compatibility alias
+- waiting behavior is now mailbox-sequence driven, but it is still simpler than Codex’s richer delivery/mailbox model
+- collaboration is still not represented as first-class thread items/events in the same way
+- the Java app-server currently exposes explicit `agent/*` controls, while upstream Codex’s public client-facing shape is more centered on collaboration tools plus streamed `collabToolCall` items
 - there are no internal system-owned agent flows such as guardian/reviewer agents
 - CLI supervision is still shallow compared with Codex’s broader agent-control model
 
 #### Implementation direction
 
-1. Promote multi-agent operations into the app-server/client boundary.
-2. Split messaging semantics into queue-only messaging versus task-triggering assignment.
-3. Add mailbox-style waiting and richer agent-status updates.
-4. Represent collaboration actions as first-class thread items/events.
-5. Add room for internal system-owned agents after the protocol shape is stable.
+1. Keep delegation prompt-driven and model-driven, not command-driven.
+2. Preserve the collaboration semantic split: `spawn_agent`, queue-only messaging, task-triggering follow-up, and mailbox-driven waiting.
+3. Represent collaboration actions as first-class thread items/events in the Java protocol and runtime.
+4. Make the CLI render collaboration items in the normal turn stream instead of depending on direct delegation UX.
+5. Treat public `agent/*` app-server methods as a transitional compatibility bridge, not the target public architecture.
+6. Add room for internal system-owned agents after the collaboration-item model is stable.
 
 ## Later Priorities
 

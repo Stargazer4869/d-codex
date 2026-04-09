@@ -26,9 +26,13 @@ import org.dean.codex.protocol.conversation.TurnStatus;
 import org.dean.codex.protocol.event.CodexTurnResult;
 import org.dean.codex.protocol.event.TurnEvent;
 import org.dean.codex.protocol.agent.AgentMessage;
+import org.dean.codex.protocol.agent.AgentStatus;
+import org.dean.codex.protocol.agent.AgentMailboxState;
 import org.dean.codex.protocol.agent.AgentSpawnRequest;
 import org.dean.codex.protocol.agent.AgentSummary;
 import org.dean.codex.protocol.agent.AgentWaitResult;
+import org.dean.codex.protocol.item.CollabToolCallItem;
+import org.dean.codex.protocol.item.CollabToolCallStatus;
 import org.dean.codex.protocol.item.AgentMessageItem;
 import org.dean.codex.protocol.item.ApprovalItem;
 import org.dean.codex.protocol.item.ApprovalState;
@@ -82,7 +86,7 @@ public class SpringAiCodexAgent implements CodexAgent {
     private final ThreadContextReconstructionService threadContextReconstructionService;
     private final ContextManager contextManager;
     private final SkillService skillService;
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
     private final Path workspaceRoot;
     private final int maxSteps;
     private final int maxActionsPerStep;
@@ -551,7 +555,30 @@ public class SpringAiCodexAgent implements CodexAgent {
                                          List<TurnItem> items,
                                          Consumer<TurnItem> itemConsumer) {
         emitItem(items, itemConsumer, toolCallItem(action.action().name(), describeTarget(action)));
+        boolean collaborationAction = isCollaborationAction(action.action());
+        Map<String, AgentMailboxState> collabMailboxes = Map.of();
+        if (collaborationAction) {
+            emitCollabToolCall(
+                    threadId,
+                    action,
+                    items,
+                    itemConsumer,
+                    CollabToolCallStatus.IN_PROGRESS,
+                    collaborationDeliveryState(action.action(), false),
+                    null,
+                    null,
+                    List.of(),
+                    Map.of(),
+                    Map.of(),
+                    null,
+                    describeTarget(action));
+        }
         String observation;
+        ThreadId collabNewThreadId = null;
+        List<ThreadId> collabReceiverThreadIds = List.of();
+        Map<String, AgentStatus> collabAgentStatuses = Map.of();
+        String collabPrompt = null;
+        String collabWakeupCause = null;
         try {
             observation = switch (action.action()) {
                 case READ_FILE -> objectMapper.writeValueAsString(fileReaderTool.readFile(action.path()));
@@ -581,29 +608,59 @@ public class SpringAiCodexAgent implements CodexAgent {
                     response.put("agent", spawnedAgent);
                     response.put("taskName", action.taskName());
                     response.put("prompt", firstNonBlank(action.prompt(), action.taskName()));
+                    collabNewThreadId = spawnedAgent.threadId();
+                    collabReceiverThreadIds = List.of(spawnedAgent.threadId());
+                    collabAgentStatuses = Map.of(spawnedAgent.threadId().value(), spawnedAgent.status());
+                    collabMailboxes = mailboxStateMap(agentControl, spawnedAgent.threadId());
+                    collabPrompt = firstNonBlank(action.prompt(), action.taskName());
                     yield objectMapper.writeValueAsString(response);
                 }
-                case SEND_INPUT -> {
+                case SEND_MESSAGE -> {
                     AgentControl agentControl = requireAgentControl();
                     ThreadId agentThreadId = new ThreadId(action.threadId());
-                    AgentSummary agentSummary = agentControl.sendInput(
+                    AgentSummary agentSummary = agentControl.sendMessage(
+                            agentThreadId,
+                            new AgentMessage(threadId, agentThreadId, action.content(), Instant.now()));
+                    LinkedHashMap<String, Object> response = new LinkedHashMap<>();
+                    response.put("success", true);
+                    response.put("action", "send_message");
+                    response.put("senderThreadId", threadId.value());
+                    response.put("threadId", agentThreadId.value());
+                    response.put("status", agentSummary.status());
+                    response.put("agent", agentSummary);
+                    response.put("content", action.content());
+                    collabReceiverThreadIds = List.of(agentThreadId);
+                    collabAgentStatuses = Map.of(agentThreadId.value(), agentSummary.status());
+                    collabMailboxes = mailboxStateMap(agentControl, agentThreadId);
+                    collabPrompt = action.content();
+                    yield objectMapper.writeValueAsString(response);
+                }
+                case ASSIGN_TASK, SEND_INPUT -> {
+                    AgentControl agentControl = requireAgentControl();
+                    ThreadId agentThreadId = new ThreadId(action.threadId());
+                    AgentSummary agentSummary = agentControl.assignTask(
                             agentThreadId,
                             new AgentMessage(threadId, agentThreadId, action.content(), Instant.now()),
                             action.interrupt());
                     LinkedHashMap<String, Object> response = new LinkedHashMap<>();
                     response.put("success", true);
-                    response.put("action", "send_input");
+                    response.put("action", action.action() == ToolAction.SEND_INPUT ? "send_input" : "assign_task");
                     response.put("senderThreadId", threadId.value());
                     response.put("threadId", agentThreadId.value());
                     response.put("status", agentSummary.status());
                     response.put("agent", agentSummary);
                     response.put("content", action.content());
                     response.put("interrupt", action.interrupt());
+                    collabReceiverThreadIds = List.of(agentThreadId);
+                    collabAgentStatuses = Map.of(agentThreadId.value(), agentSummary.status());
+                    collabMailboxes = mailboxStateMap(agentControl, agentThreadId);
+                    collabPrompt = action.content();
                     yield objectMapper.writeValueAsString(response);
                 }
                 case WAIT_AGENT -> {
                     AgentControl agentControl = requireAgentControl();
-                    AgentWaitResult waitResult = agentControl.waitAgent(action.threadIds(), action.timeoutMillis() == null ? 1000L : action.timeoutMillis());
+                    List<ThreadId> waitTargets = action.threadIds() == null ? List.of() : action.threadIds();
+                    AgentWaitResult waitResult = agentControl.waitAgent(waitTargets, action.timeoutMillis() == null ? 1000L : action.timeoutMillis());
                     LinkedHashMap<String, Object> response = new LinkedHashMap<>();
                     response.put("success", true);
                     response.put("action", "wait_agent");
@@ -616,8 +673,25 @@ public class SpringAiCodexAgent implements CodexAgent {
                     response.put("finalAnswer", waitResult.finalAnswer());
                     response.put("completedAt", waitResult.completedAt());
                     response.put("result", waitResult);
-                    response.put("threadIds", action.threadIds().stream().map(ThreadId::value).toList());
+                    response.put("threadIds", waitTargets.stream().map(ThreadId::value).toList());
                     response.put("timeoutMillis", action.timeoutMillis() == null ? 1000L : action.timeoutMillis());
+                    collabReceiverThreadIds = List.copyOf(waitTargets);
+                    if (waitResult.threadId() != null && waitResult.status() != null) {
+                        collabAgentStatuses = Map.of(waitResult.threadId().value(), waitResult.status());
+                    }
+                    LinkedHashMap<String, AgentMailboxState> waitMailboxes = new LinkedHashMap<>();
+                    for (ThreadId waitTarget : waitTargets) {
+                        if (waitTarget == null) {
+                            continue;
+                        }
+                        AgentMailboxState mailboxState = agentControl.mailboxState(waitTarget);
+                        if (mailboxState != null) {
+                            waitMailboxes.put(waitTarget.value(), mailboxState);
+                        }
+                    }
+                    collabMailboxes = waitMailboxes;
+                    collabWakeupCause = normalizeWakeupCause(waitResult.message(), waitResult.timedOut());
+                    collabPrompt = "wait_agent";
                     yield objectMapper.writeValueAsString(response);
                 }
                 case RESUME_AGENT -> {
@@ -630,6 +704,9 @@ public class SpringAiCodexAgent implements CodexAgent {
                     response.put("threadId", agentThreadId.value());
                     response.put("status", agentSummary.status());
                     response.put("agent", agentSummary);
+                    collabReceiverThreadIds = List.of(agentThreadId);
+                    collabAgentStatuses = Map.of(agentThreadId.value(), agentSummary.status());
+                    collabMailboxes = mailboxStateMap(agentControl, agentThreadId);
                     yield objectMapper.writeValueAsString(response);
                 }
                 case CLOSE_AGENT -> {
@@ -643,6 +720,9 @@ public class SpringAiCodexAgent implements CodexAgent {
                     response.put("status", agentSummary.status());
                     response.put("closed", agentSummary.closed());
                     response.put("agent", agentSummary);
+                    collabReceiverThreadIds = List.of(agentThreadId);
+                    collabAgentStatuses = Map.of(agentThreadId.value(), agentSummary.status());
+                    collabMailboxes = mailboxStateMap(agentControl, agentThreadId);
                     yield objectMapper.writeValueAsString(response);
                 }
                 case LIST_AGENTS -> {
@@ -663,6 +743,22 @@ public class SpringAiCodexAgent implements CodexAgent {
         catch (Exception exception) {
             observation = createErrorObservation(exception.getMessage());
         }
+        emitCollabToolCall(
+                threadId,
+                action,
+                items,
+                itemConsumer,
+                observation != null && observation.contains("\"success\":false")
+                        ? CollabToolCallStatus.FAILED
+                        : CollabToolCallStatus.COMPLETED,
+                collaborationDeliveryState(action.action(), true),
+                observation,
+                collabNewThreadId,
+                collabReceiverThreadIds,
+                collabAgentStatuses,
+                collabMailboxes,
+                collabWakeupCause,
+                collabPrompt);
         ActionExecutionOutcome outcome = enrichApprovalObservation(threadId, turnId, action, observation, items, itemConsumer);
         observation = outcome.observation();
         emitItem(items, itemConsumer, toolResultItem(action.action().name(), summarizeToolResult(action.action(), observation)));
@@ -726,7 +822,9 @@ public class SpringAiCodexAgent implements CodexAgent {
                 - WRITE_FILE: create or overwrite a file relative to the workspace root
                 - RUN_COMMAND: run a zsh command from the workspace root, subject to approval policy
                 - spawn_agent: spawn a delegated sub-agent from the current thread
-                - send_input: send a message to an existing sub-agent thread
+                - send_message: queue a plain message to an existing sub-agent thread without starting work
+                - assign_task: queue work for an existing sub-agent thread and let it start if idle
+                - send_input: compatibility alias for assign_task
                 - wait_agent: wait for one or more sub-agents to change status or mailbox state
                 - resume_agent: resume a paused or waiting sub-agent thread
                 - close_agent: close a sub-agent thread subtree
@@ -897,9 +995,14 @@ public class SpringAiCodexAgent implements CodexAgent {
                     + " taskName=" + blankToPlaceholder(action.taskName())
                     + " nickname=" + blankToPlaceholder(action.nickname())
                     + " role=" + blankToPlaceholder(action.role());
-            case SEND_INPUT -> action.action()
+            case SEND_MESSAGE -> action.action()
+                    + " threadId=" + blankToPlaceholder(action.threadId());
+            case ASSIGN_TASK -> action.action()
                     + " threadId=" + blankToPlaceholder(action.threadId())
                     + " interrupt=" + action.interrupt();
+            case SEND_INPUT -> action.action()
+                    + " threadId=" + blankToPlaceholder(action.threadId())
+                    + " interrupt=" + action.interrupt() + " (compat)";
             case WAIT_AGENT -> action.action()
                     + " threadIds=" + (action.threadIds().isEmpty() ? "(none)" : action.threadIds())
                     + " timeoutMillis=" + (action.timeoutMillis() == null ? "(default)" : action.timeoutMillis());
@@ -916,7 +1019,7 @@ public class SpringAiCodexAgent implements CodexAgent {
             case SEARCH_FILES -> "query=" + blankToPlaceholder(action.query()) + ", scope=" + blankToPlaceholder(action.path());
             case RUN_COMMAND -> blankToPlaceholder(action.command());
             case SPAWN_AGENT -> blankToPlaceholder(action.taskName());
-            case SEND_INPUT, RESUME_AGENT, CLOSE_AGENT -> blankToPlaceholder(action.threadId());
+            case SEND_MESSAGE, ASSIGN_TASK, SEND_INPUT, RESUME_AGENT, CLOSE_AGENT -> blankToPlaceholder(action.threadId());
             case WAIT_AGENT -> action.threadIds().isEmpty()
                     ? "(none)"
                     : action.threadIds().stream().map(ThreadId::value).collect(Collectors.joining(", "));
@@ -1134,6 +1237,112 @@ public class SpringAiCodexAgent implements CodexAgent {
         }
     }
 
+    private void emitCollabToolCall(ThreadId senderThreadId,
+                                    ToolActionRequest action,
+                                    List<TurnItem> items,
+                                    Consumer<TurnItem> itemConsumer,
+                                    CollabToolCallStatus status,
+                                    org.dean.codex.protocol.item.CollabDeliveryState deliveryState,
+                                    String observation,
+                                    ThreadId newThreadId,
+                                    List<ThreadId> receiverThreadIds,
+                                    Map<String, AgentStatus> agentStatuses,
+                                    Map<String, AgentMailboxState> mailboxes,
+                                    String wakeupCause,
+                                    String prompt) {
+        if (!isCollaborationAction(action.action())) {
+            return;
+        }
+        emitItem(items, itemConsumer, new CollabToolCallItem(
+                new ItemId(UUID.randomUUID().toString()),
+                collaborationToolName(action.action()),
+                status,
+                deliveryState,
+                senderThreadId,
+                receiverThreadIds == null ? List.of() : receiverThreadIds,
+                newThreadId,
+                prompt,
+                agentStatuses == null ? Map.of() : agentStatuses,
+                mailboxes == null ? Map.of() : mailboxes,
+                wakeupCause,
+                Instant.now()));
+    }
+
+    private String normalizeWakeupCause(String message, boolean timedOut) {
+        if (timedOut) {
+            return "timed_out";
+        }
+        if (message == null || message.isBlank()) {
+            return null;
+        }
+        String normalized = message.toLowerCase(java.util.Locale.ROOT);
+        if (normalized.contains("mailbox updated") || normalized.contains("mailbox changed")) {
+            return "mailbox_updated";
+        }
+        if (normalized.contains("produced a new turn")) {
+            return "turn_result";
+        }
+        if (normalized.contains("status changed")) {
+            return "status_changed";
+        }
+        return "mailbox_event";
+    }
+
+    private org.dean.codex.protocol.item.CollabDeliveryState collaborationDeliveryState(ToolAction action, boolean terminal) {
+        if (terminal) {
+            return switch (action) {
+                case WAIT_AGENT -> org.dean.codex.protocol.item.CollabDeliveryState.WAKEUP;
+                case SEND_MESSAGE -> org.dean.codex.protocol.item.CollabDeliveryState.QUEUED;
+                case ASSIGN_TASK, SEND_INPUT, SPAWN_AGENT, RESUME_AGENT -> org.dean.codex.protocol.item.CollabDeliveryState.DISPATCHED;
+                case CLOSE_AGENT -> org.dean.codex.protocol.item.CollabDeliveryState.COMPLETED;
+                case LIST_AGENTS, READ_FILE, SEARCH_FILES, APPLY_PATCH, WRITE_FILE, RUN_COMMAND -> null;
+            };
+        }
+        return switch (action) {
+            case SEND_MESSAGE -> org.dean.codex.protocol.item.CollabDeliveryState.QUEUED;
+            case ASSIGN_TASK, SEND_INPUT, SPAWN_AGENT, RESUME_AGENT -> org.dean.codex.protocol.item.CollabDeliveryState.DISPATCHED;
+            case WAIT_AGENT -> org.dean.codex.protocol.item.CollabDeliveryState.WAITING;
+            case CLOSE_AGENT -> org.dean.codex.protocol.item.CollabDeliveryState.COMPLETED;
+            case LIST_AGENTS, READ_FILE, SEARCH_FILES, APPLY_PATCH, WRITE_FILE, RUN_COMMAND -> null;
+        };
+    }
+
+    private Map<String, AgentMailboxState> mailboxStateMap(AgentControl agentControl, ThreadId agentThreadId) {
+        if (agentControl == null || agentThreadId == null) {
+            return Map.of();
+        }
+        AgentMailboxState mailboxState = agentControl.mailboxState(agentThreadId);
+        if (mailboxState == null) {
+            return Map.of();
+        }
+        return Map.of(agentThreadId.value(), mailboxState);
+    }
+
+    private boolean isCollaborationAction(ToolAction action) {
+        return switch (action) {
+            case SPAWN_AGENT, SEND_MESSAGE, ASSIGN_TASK, SEND_INPUT, WAIT_AGENT, RESUME_AGENT, CLOSE_AGENT -> true;
+            case READ_FILE, SEARCH_FILES, APPLY_PATCH, WRITE_FILE, RUN_COMMAND, LIST_AGENTS -> false;
+        };
+    }
+
+    private String collaborationToolName(ToolAction action) {
+        return switch (action) {
+            case SPAWN_AGENT -> "spawn_agent";
+            case SEND_MESSAGE -> "send_message";
+            case ASSIGN_TASK -> "assign_task";
+            case SEND_INPUT -> "send_input";
+            case WAIT_AGENT -> "wait_agent";
+            case RESUME_AGENT -> "resume_agent";
+            case CLOSE_AGENT -> "close_agent";
+            case LIST_AGENTS -> "list_agents";
+            case READ_FILE -> "read_file";
+            case SEARCH_FILES -> "search_files";
+            case APPLY_PATCH -> "apply_patch";
+            case WRITE_FILE -> "write_file";
+            case RUN_COMMAND -> "run_command";
+        };
+    }
+
     private String renderActivityForPrompt(ReconstructedTurnActivity activity) {
         return blankToPlaceholder(activity.sourceType()) + ": " + blankToPlaceholder(activity.detail());
     }
@@ -1286,12 +1495,15 @@ public class SpringAiCodexAgent implements CodexAgent {
                         return "Action %d (SPAWN_AGENT) requires depth >= 0 when provided.".formatted(displayIndex);
                     }
                 }
-                case SEND_INPUT, RESUME_AGENT, CLOSE_AGENT -> {
+                case SEND_MESSAGE, ASSIGN_TASK, SEND_INPUT, RESUME_AGENT, CLOSE_AGENT -> {
                     if (action.threadId().isBlank()) {
                         return "Action %d (%s) requires a non-blank threadId.".formatted(displayIndex, action.action());
                     }
-                    if (action.action() == ToolAction.SEND_INPUT && action.content().isBlank()) {
-                        return "Action %d (SEND_INPUT) requires a non-blank content.".formatted(displayIndex);
+                    if ((action.action() == ToolAction.SEND_MESSAGE
+                            || action.action() == ToolAction.ASSIGN_TASK
+                            || action.action() == ToolAction.SEND_INPUT)
+                            && action.content().isBlank()) {
+                        return "Action %d (%s) requires a non-blank content.".formatted(displayIndex, action.action());
                     }
                 }
                 case WAIT_AGENT -> {
@@ -1410,6 +1622,8 @@ public class SpringAiCodexAgent implements CodexAgent {
         WRITE_FILE,
         RUN_COMMAND,
         SPAWN_AGENT,
+        SEND_MESSAGE,
+        ASSIGN_TASK,
         SEND_INPUT,
         WAIT_AGENT,
         RESUME_AGENT,

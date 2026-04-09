@@ -12,6 +12,7 @@ import org.dean.codex.protocol.approval.ApprovalId;
 import org.dean.codex.protocol.approval.ApprovalStatus;
 import org.dean.codex.protocol.approval.CommandApprovalRequest;
 import org.dean.codex.protocol.agent.AgentMessage;
+import org.dean.codex.protocol.agent.AgentMailboxState;
 import org.dean.codex.protocol.agent.AgentSpawnRequest;
 import org.dean.codex.protocol.agent.AgentStatus;
 import org.dean.codex.protocol.agent.AgentSummary;
@@ -31,6 +32,8 @@ import org.dean.codex.protocol.tool.FileSearchResult;
 import org.dean.codex.protocol.tool.FileWriteResult;
 import org.dean.codex.protocol.tool.SearchMatch;
 import org.dean.codex.protocol.tool.ShellCommandResult;
+import org.dean.codex.protocol.item.CollabToolCallItem;
+import org.dean.codex.protocol.item.CollabToolCallStatus;
 import org.dean.codex.protocol.item.ToolCallItem;
 import org.dean.codex.protocol.item.ToolResultItem;
 import org.dean.codex.runtime.springai.config.CodexProperties;
@@ -244,7 +247,12 @@ class SpringAiCodexAgentTest {
                       "cwd": "subdir"
                     },
                     {
-                      "action": "send_input",
+                      "action": "send_message",
+                      "threadId": "agent-1",
+                      "content": "hello"
+                    },
+                    {
+                      "action": "assign_task",
                       "threadId": "agent-1",
                       "content": "continue",
                       "interrupt": true
@@ -273,15 +281,17 @@ class SpringAiCodexAgentTest {
 
         assertFalse(step.isFinished());
         assertNull(step.validationError());
-        assertEquals(6, step.actions().size());
+        assertEquals(7, step.actions().size());
         assertEquals(SpringAiCodexAgent.ToolAction.SPAWN_AGENT, step.actions().get(0).action());
         assertEquals("inspect repository", step.actions().get(0).taskName());
-        assertEquals(SpringAiCodexAgent.ToolAction.SEND_INPUT, step.actions().get(1).action());
+        assertEquals(SpringAiCodexAgent.ToolAction.SEND_MESSAGE, step.actions().get(1).action());
+        assertEquals(SpringAiCodexAgent.ToolAction.ASSIGN_TASK, step.actions().get(2).action());
         assertEquals("agent-1", step.actions().get(1).threadId());
-        assertEquals(List.of(new ThreadId("agent-1"), new ThreadId("agent-2")), step.actions().get(2).threadIds());
-        assertEquals(Long.valueOf(2500), step.actions().get(2).timeoutMillis());
-        assertEquals(SpringAiCodexAgent.ToolAction.LIST_AGENTS, step.actions().get(5).action());
-        assertFalse(step.actions().get(5).recursive());
+        assertEquals("agent-1", step.actions().get(2).threadId());
+        assertEquals(List.of(new ThreadId("agent-1"), new ThreadId("agent-2")), step.actions().get(3).threadIds());
+        assertEquals(Long.valueOf(2500), step.actions().get(3).timeoutMillis());
+        assertEquals(SpringAiCodexAgent.ToolAction.LIST_AGENTS, step.actions().get(6).action());
+        assertFalse(step.actions().get(6).recursive());
     }
 
     @Test
@@ -553,7 +563,19 @@ class SpringAiCodexAgentTest {
                           "summary": "Message the helper",
                           "actions": [
                             {
-                              "action": "send_input",
+                              "action": "send_message",
+                              "threadId": "agent-1",
+                              "content": "hello"
+                            }
+                          ]
+                        }
+                        """,
+                        """
+                        {
+                          "summary": "Assign the helper work",
+                          "actions": [
+                            {
+                              "action": "assign_task",
                               "threadId": "agent-1",
                               "content": "continue",
                               "interrupt": true
@@ -620,14 +642,23 @@ class SpringAiCodexAgentTest {
         assertEquals(TurnStatus.COMPLETED, result.status());
         assertEquals("inspect repository", agentControl.spawnRequest.taskName());
         assertEquals(threadId, agentControl.spawnRequest.parentThreadId());
-        assertEquals(new ThreadId("agent-1"), agentControl.sendInputThreadId);
-        assertEquals("continue", agentControl.sendInputMessage.content());
+        assertEquals(new ThreadId("agent-1"), agentControl.sendMessageThreadId);
+        assertEquals("hello", agentControl.sendMessageMessage.content());
+        assertEquals(new ThreadId("agent-1"), agentControl.assignTaskThreadId);
+        assertEquals("continue", agentControl.assignTaskMessage.content());
         assertEquals(List.of(new ThreadId("agent-1")), agentControl.waitThreadIds);
         assertEquals(new ThreadId("agent-1"), agentControl.resumeThreadId);
         assertEquals(new ThreadId("agent-1"), agentControl.closeThreadId);
         assertEquals(threadId, agentControl.listAgentsParentThreadId);
         assertTrue(result.items().stream().anyMatch(ToolCallItem.class::isInstance));
         assertTrue(result.items().stream().anyMatch(ToolResultItem.class::isInstance));
+        assertTrue(result.items().stream().anyMatch(item -> item instanceof CollabToolCallItem collab
+                && collab.status() == CollabToolCallStatus.IN_PROGRESS));
+        assertTrue(result.items().stream().anyMatch(item -> item instanceof CollabToolCallItem collab
+                && (collab.status() == CollabToolCallStatus.COMPLETED
+                || collab.status() == CollabToolCallStatus.FAILED)));
+        assertTrue(result.items().stream().anyMatch(item -> item instanceof CollabToolCallItem collab
+                && "mailbox_updated".equals(collab.wakeupCause())));
     }
 
     private static final class NoOpChatClientBuilder implements ChatClient.Builder {
@@ -854,7 +885,7 @@ class SpringAiCodexAgentTest {
         @Override
         public AgentWaitResult waitAgent(List<ThreadId> agentThreadIds, long timeoutMillis) {
             ThreadId threadId = agentThreadIds == null || agentThreadIds.isEmpty() ? null : agentThreadIds.get(0);
-            return new AgentWaitResult(threadId, null, AgentStatus.RUNNING, AgentStatus.IDLE, true, "Timed out.", "", Instant.now());
+            return new AgentWaitResult(threadId, null, AgentStatus.RUNNING, AgentStatus.IDLE, true, "Timed out.", "", new AgentMailboxState(threadId, 0L, 0, Instant.now()), Instant.now());
         }
 
         @Override
@@ -881,8 +912,10 @@ class SpringAiCodexAgentTest {
     private static final class RecordingAgentControl implements AgentControl {
 
         private AgentSpawnRequest spawnRequest;
-        private AgentMessage sendInputMessage;
-        private ThreadId sendInputThreadId;
+        private AgentMessage sendMessageMessage;
+        private ThreadId sendMessageThreadId;
+        private AgentMessage assignTaskMessage;
+        private ThreadId assignTaskThreadId;
         private List<ThreadId> waitThreadIds = List.of();
         private long waitTimeoutMillis;
         private ThreadId resumeThreadId;
@@ -899,8 +932,21 @@ class SpringAiCodexAgentTest {
 
         @Override
         public AgentSummary sendInput(ThreadId agentThreadId, AgentMessage message, boolean interrupt) {
-            this.sendInputThreadId = agentThreadId;
-            this.sendInputMessage = message;
+            return assignTask(agentThreadId, message, interrupt);
+        }
+
+        @Override
+        public AgentSummary sendMessage(ThreadId agentThreadId, AgentMessage message) {
+            this.sendMessageThreadId = agentThreadId;
+            this.sendMessageMessage = message;
+            Instant now = Instant.parse("2026-04-01T00:01:00Z");
+            return new AgentSummary(agentThreadId, message == null ? null : message.senderThreadId(), "inspector", "reviewer", "subdir", 1, AgentStatus.IDLE, now, now, null);
+        }
+
+        @Override
+        public AgentSummary assignTask(ThreadId agentThreadId, AgentMessage message, boolean interrupt) {
+            this.assignTaskThreadId = agentThreadId;
+            this.assignTaskMessage = message;
             Instant now = Instant.parse("2026-04-01T00:01:00Z");
             return new AgentSummary(agentThreadId, message == null ? null : message.senderThreadId(), "inspector", "reviewer", "subdir", 1, AgentStatus.RUNNING, now, now, null);
         }
@@ -910,7 +956,7 @@ class SpringAiCodexAgentTest {
             this.waitThreadIds = agentThreadIds == null ? List.of() : List.copyOf(agentThreadIds);
             this.waitTimeoutMillis = timeoutMillis;
             ThreadId threadId = this.waitThreadIds.isEmpty() ? null : this.waitThreadIds.get(0);
-            return new AgentWaitResult(threadId, new TurnId("turn-1"), AgentStatus.RUNNING, AgentStatus.WAITING, false, "Agent mailbox changed.", "turn completed", Instant.parse("2026-04-01T00:02:00Z"));
+            return new AgentWaitResult(threadId, new TurnId("turn-1"), AgentStatus.RUNNING, AgentStatus.WAITING, false, "Agent mailbox changed.", "turn completed", new AgentMailboxState(threadId, 1L, 1, Instant.parse("2026-04-01T00:02:00Z")), Instant.parse("2026-04-01T00:02:00Z"));
         }
 
         @Override

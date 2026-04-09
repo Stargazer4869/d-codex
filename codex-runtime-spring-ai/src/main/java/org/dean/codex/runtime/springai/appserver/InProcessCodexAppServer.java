@@ -1,8 +1,32 @@
 package org.dean.codex.runtime.springai.appserver;
 
+import org.dean.codex.core.agent.AgentControl;
 import org.dean.codex.core.appserver.CodexAppServer;
 import org.dean.codex.core.appserver.CodexAppServerSession;
 import org.dean.codex.core.runtime.CodexRuntimeGateway;
+import org.dean.codex.core.tool.local.ShellCommandTool;
+import org.dean.codex.protocol.agent.AgentMessage;
+import org.dean.codex.protocol.agent.AgentMailboxState;
+import org.dean.codex.protocol.agent.AgentSpawnRequest;
+import org.dean.codex.protocol.agent.AgentSummary;
+import org.dean.codex.protocol.agent.AgentWaitResult;
+import org.dean.codex.protocol.appserver.AgentCloseParams;
+import org.dean.codex.protocol.appserver.AgentCloseResponse;
+import org.dean.codex.protocol.appserver.AgentAssignTaskParams;
+import org.dean.codex.protocol.appserver.AgentAssignTaskResponse;
+import org.dean.codex.protocol.appserver.AgentListParams;
+import org.dean.codex.protocol.appserver.AgentListResponse;
+import org.dean.codex.protocol.appserver.AgentMailboxUpdatedNotification;
+import org.dean.codex.protocol.appserver.AgentResumeParams;
+import org.dean.codex.protocol.appserver.AgentResumeResponse;
+import org.dean.codex.protocol.appserver.AgentSendInputParams;
+import org.dean.codex.protocol.appserver.AgentSendInputResponse;
+import org.dean.codex.protocol.appserver.AgentSendMessageParams;
+import org.dean.codex.protocol.appserver.AgentSendMessageResponse;
+import org.dean.codex.protocol.appserver.AgentSpawnParams;
+import org.dean.codex.protocol.appserver.AgentSpawnResponse;
+import org.dean.codex.protocol.appserver.AgentWaitParams;
+import org.dean.codex.protocol.appserver.AgentWaitResponse;
 import org.dean.codex.protocol.appserver.AppServerNotification;
 import org.dean.codex.protocol.appserver.InitializeParams;
 import org.dean.codex.protocol.appserver.InitializeResponse;
@@ -11,6 +35,8 @@ import org.dean.codex.protocol.appserver.SkillsListParams;
 import org.dean.codex.protocol.appserver.SkillsListResponse;
 import org.dean.codex.protocol.appserver.ThreadArchiveParams;
 import org.dean.codex.protocol.appserver.ThreadArchiveResponse;
+import org.dean.codex.protocol.appserver.ThreadBackgroundTerminalsCleanParams;
+import org.dean.codex.protocol.appserver.ThreadBackgroundTerminalsCleanResponse;
 import org.dean.codex.protocol.appserver.ThreadCompaction;
 import org.dean.codex.protocol.appserver.ThreadCompactStartParams;
 import org.dean.codex.protocol.appserver.ThreadCompactStartResponse;
@@ -18,12 +44,22 @@ import org.dean.codex.protocol.appserver.ThreadCompactionStartedNotification;
 import org.dean.codex.protocol.appserver.ThreadCompactedNotification;
 import org.dean.codex.protocol.appserver.ThreadForkParams;
 import org.dean.codex.protocol.appserver.ThreadForkResponse;
+import org.dean.codex.protocol.appserver.ThreadClosedNotification;
 import org.dean.codex.protocol.appserver.ThreadListParams;
 import org.dean.codex.protocol.appserver.ThreadListResponse;
 import org.dean.codex.protocol.appserver.ThreadLoadedListParams;
 import org.dean.codex.protocol.appserver.ThreadLoadedListResponse;
 import org.dean.codex.protocol.appserver.ThreadReadParams;
 import org.dean.codex.protocol.appserver.ThreadReadResponse;
+import org.dean.codex.protocol.appserver.ThreadMetadataUpdateParams;
+import org.dean.codex.protocol.appserver.ThreadMetadataUpdateResponse;
+import org.dean.codex.protocol.appserver.ThreadMetadataUpdatedNotification;
+import org.dean.codex.protocol.appserver.ThreadNameSetParams;
+import org.dean.codex.protocol.appserver.ThreadNameSetResponse;
+import org.dean.codex.protocol.appserver.ThreadNameUpdatedNotification;
+import org.dean.codex.protocol.appserver.ThreadStatusChangedNotification;
+import org.dean.codex.protocol.appserver.ThreadShellCommandParams;
+import org.dean.codex.protocol.appserver.ThreadShellCommandResponse;
 import org.dean.codex.protocol.appserver.ThreadRollbackParams;
 import org.dean.codex.protocol.appserver.ThreadRollbackResponse;
 import org.dean.codex.protocol.appserver.ThreadResumeParams;
@@ -35,6 +71,8 @@ import org.dean.codex.protocol.appserver.ThreadStartedNotification;
 import org.dean.codex.protocol.appserver.ThreadSourceKind;
 import org.dean.codex.protocol.appserver.ThreadUnarchiveParams;
 import org.dean.codex.protocol.appserver.ThreadUnarchiveResponse;
+import org.dean.codex.protocol.appserver.ThreadUnsubscribeParams;
+import org.dean.codex.protocol.appserver.ThreadUnsubscribeResponse;
 import org.dean.codex.protocol.appserver.TurnCompletedNotification;
 import org.dean.codex.protocol.appserver.TurnInterruptParams;
 import org.dean.codex.protocol.appserver.TurnInterruptResponse;
@@ -46,15 +84,18 @@ import org.dean.codex.protocol.appserver.TurnStartResponse;
 import org.dean.codex.protocol.appserver.TurnStartedNotification;
 import org.dean.codex.protocol.appserver.TurnSteerParams;
 import org.dean.codex.protocol.appserver.TurnSteerResponse;
+import org.dean.codex.protocol.tool.ShellCommandResult;
 import org.dean.codex.protocol.conversation.ConversationTurn;
 import org.dean.codex.protocol.conversation.ThreadId;
 import org.dean.codex.protocol.conversation.ThreadSummary;
 import org.dean.codex.protocol.runtime.RuntimeNotification;
 import org.dean.codex.protocol.runtime.RuntimeNotificationType;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.concurrent.TimeUnit;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -68,9 +109,16 @@ import java.util.function.Consumer;
 public class InProcessCodexAppServer implements CodexAppServer {
 
     private final CodexRuntimeGateway runtimeGateway;
+    private final ShellCommandTool shellCommandTool;
+
+    @Autowired
+    public InProcessCodexAppServer(CodexRuntimeGateway runtimeGateway, ShellCommandTool shellCommandTool) {
+        this.runtimeGateway = runtimeGateway;
+        this.shellCommandTool = shellCommandTool;
+    }
 
     public InProcessCodexAppServer(CodexRuntimeGateway runtimeGateway) {
-        this.runtimeGateway = runtimeGateway;
+        this(runtimeGateway, null);
     }
 
     @Override
@@ -82,6 +130,7 @@ public class InProcessCodexAppServer implements CodexAppServer {
 
         private final CopyOnWriteArrayList<Consumer<AppServerNotification>> subscribers = new CopyOnWriteArrayList<>();
         private final Map<ThreadId, AutoCloseable> runtimeSubscriptions = new ConcurrentHashMap<>();
+        private final Map<ThreadId, List<BackgroundTerminalHandle>> backgroundTerminals = new ConcurrentHashMap<>();
         private final Set<String> optOutNotificationMethods = new HashSet<>();
         private boolean initializeCalled;
         private boolean initializedAcknowledged;
@@ -123,8 +172,13 @@ public class InProcessCodexAppServer implements CodexAppServer {
         @Override
         public ThreadResumeResponse threadResume(ThreadResumeParams params) {
             ensureReady();
-            ThreadSummary thread = runtimeGateway.threadResume(requireThreadId(params));
+            ThreadId threadId = requireThreadId(params);
+            boolean alreadyLoaded = runtimeGateway.loadedThreads().contains(threadId);
+            ThreadSummary thread = runtimeGateway.threadResume(threadId);
             ensureRuntimeSubscriptions(loadedRelatedThreadIds(thread.threadId()));
+            if (!alreadyLoaded) {
+                publish(new ThreadStatusChangedNotification(thread));
+            }
             return new ThreadResumeResponse(thread);
         }
 
@@ -204,6 +258,173 @@ public class InProcessCodexAppServer implements CodexAppServer {
             }
             ThreadSummary thread = runtimeGateway.threadRollback(threadId, params.numTurns());
             return new ThreadRollbackResponse(thread, runtimeGateway.turns(threadId));
+        }
+
+        @Override
+        public ThreadUnsubscribeResponse threadUnsubscribe(ThreadUnsubscribeParams params) {
+            ensureReady();
+            ThreadId threadId = requireThreadId(params);
+            boolean loaded = runtimeGateway.loadedThreads().contains(threadId);
+            AutoCloseable runtimeSubscription = runtimeSubscriptions.remove(threadId);
+            if (runtimeSubscription == null) {
+                return new ThreadUnsubscribeResponse(loaded ? "notSubscribed" : "notLoaded");
+            }
+            ThreadSummary closedThread = runtimeGateway.listThreads().stream()
+                    .filter(thread -> thread.threadId().equals(threadId))
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalArgumentException("Unknown thread id: " + threadId.value()));
+            try {
+                runtimeSubscription.close();
+            }
+            catch (Exception exception) {
+                throw new IllegalStateException("Unable to unsubscribe thread " + threadId.value(), exception);
+            }
+            if (!loaded) {
+                return new ThreadUnsubscribeResponse("notLoaded");
+            }
+            if (runtimeGateway.threadSubscriptionCount(threadId) == 0) {
+                runtimeGateway.unloadThread(threadId);
+                ThreadSummary unloadedThread = runtimeGateway.listThreads().stream()
+                        .filter(thread -> thread.threadId().equals(threadId))
+                        .findFirst()
+                        .orElse(closedThread);
+                publish(new ThreadStatusChangedNotification(unloadedThread));
+                publish(new ThreadClosedNotification(unloadedThread));
+            }
+            return new ThreadUnsubscribeResponse("unsubscribed");
+        }
+
+        @Override
+        public ThreadNameSetResponse threadNameSet(ThreadNameSetParams params) {
+            ensureReady();
+            ThreadId threadId = requireThreadId(params);
+            ThreadSummary updated = runtimeGateway.renameThread(threadId, params.title());
+            publish(new ThreadNameUpdatedNotification(updated));
+            return new ThreadNameSetResponse();
+        }
+
+        @Override
+        public ThreadMetadataUpdateResponse threadMetadataUpdate(ThreadMetadataUpdateParams params) {
+            ensureReady();
+            ThreadId threadId = requireThreadId(params);
+            ThreadSummary updated = runtimeGateway.updateThreadMetadata(threadId, params.cwd(), params.modelProvider(), params.model());
+            publish(new ThreadMetadataUpdatedNotification(updated));
+            return new ThreadMetadataUpdateResponse(updated);
+        }
+
+        @Override
+        public ThreadShellCommandResponse threadShellCommand(ThreadShellCommandParams params) {
+            ensureReady();
+            ThreadId threadId = requireThreadId(params);
+            requireLoadedThread(threadId);
+            String command = params == null ? null : params.command();
+            if (isBackgroundCommand(command)) {
+                ShellCommandResult result = launchBackgroundTerminal(threadId, command);
+                return new ThreadShellCommandResponse(result);
+            }
+            if (shellCommandTool == null) {
+                throw new IllegalStateException("Thread shell command service is not configured");
+            }
+            ShellCommandResult result = shellCommandTool.runCommand(command);
+            return new ThreadShellCommandResponse(result);
+        }
+
+        @Override
+        public ThreadBackgroundTerminalsCleanResponse threadBackgroundTerminalsClean(ThreadBackgroundTerminalsCleanParams params) {
+            ensureReady();
+            ThreadId threadId = requireThreadId(params);
+            List<BackgroundTerminalHandle> handles = backgroundTerminals.remove(threadId);
+            if (handles == null || handles.isEmpty()) {
+                return new ThreadBackgroundTerminalsCleanResponse(threadId, 0);
+            }
+            int cleanedCount = 0;
+            for (BackgroundTerminalHandle handle : handles) {
+                if (terminateBackgroundTerminal(handle)) {
+                    cleanedCount++;
+                }
+            }
+            return new ThreadBackgroundTerminalsCleanResponse(threadId, cleanedCount);
+        }
+
+        @Override
+        public AgentSpawnResponse agentSpawn(AgentSpawnParams params) {
+            ensureReady();
+            AgentSpawnRequest request = params == null ? null : params.request();
+            AgentSummary summary = agentControl().spawnAgent(request);
+            ensureRuntimeSubscriptions(List.of(summary.threadId()));
+            ThreadSummary spawnedThread = runtimeGateway.listThreads().stream()
+                    .filter(thread -> thread.threadId().equals(summary.threadId()))
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalStateException("Unable to load spawned agent thread: " + summary.threadId().value()));
+            publish(new ThreadStartedNotification(spawnedThread));
+            publishMailboxUpdate(summary.threadId());
+            return new AgentSpawnResponse(summary);
+        }
+
+        @Override
+        public AgentSendInputResponse agentSendInput(AgentSendInputParams params) {
+            return new AgentSendInputResponse(agentAssignTask(new AgentAssignTaskParams(
+                    params == null ? null : params.agentThreadId(),
+                    params == null ? null : params.message(),
+                    params != null && params.interrupt())).agent());
+        }
+
+        @Override
+        public AgentSendMessageResponse agentSendMessage(AgentSendMessageParams params) {
+            ensureReady();
+            ThreadId agentThreadId = params == null ? null : params.agentThreadId();
+            ensureRuntimeSubscriptions(List.of(agentThreadId));
+            AgentMessage message = params == null ? null : params.message();
+            AgentSummary summary = agentControl().sendMessage(agentThreadId, message);
+            publishMailboxUpdate(agentThreadId);
+            return new AgentSendMessageResponse(summary);
+        }
+
+        @Override
+        public AgentAssignTaskResponse agentAssignTask(AgentAssignTaskParams params) {
+            ensureReady();
+            ThreadId agentThreadId = params == null ? null : params.agentThreadId();
+            ensureRuntimeSubscriptions(List.of(agentThreadId));
+            AgentMessage message = params == null ? null : params.message();
+            boolean interrupt = params != null && params.interrupt();
+            AgentSummary summary = agentControl().assignTask(agentThreadId, message, interrupt);
+            publishMailboxUpdate(agentThreadId);
+            return new AgentAssignTaskResponse(summary);
+        }
+
+        @Override
+        public AgentWaitResponse agentWait(AgentWaitParams params) {
+            ensureReady();
+            List<ThreadId> threadIds = params == null ? List.of() : params.agentThreadIds();
+            long timeoutMillis = params == null ? 1000L : params.timeoutMillis();
+            AgentWaitResult result = agentControl().waitAgent(threadIds, timeoutMillis);
+            return new AgentWaitResponse(result);
+        }
+
+        @Override
+        public AgentResumeResponse agentResume(AgentResumeParams params) {
+            ensureReady();
+            ThreadId agentThreadId = params == null ? null : params.agentThreadId();
+            AgentSummary summary = agentControl().resumeAgent(agentThreadId);
+            ensureRuntimeSubscriptions(List.of(summary.threadId()));
+            publishMailboxUpdate(summary.threadId());
+            return new AgentResumeResponse(summary);
+        }
+
+        @Override
+        public AgentCloseResponse agentClose(AgentCloseParams params) {
+            ensureReady();
+            ThreadId agentThreadId = params == null ? null : params.agentThreadId();
+            AgentSummary summary = agentControl().closeAgent(agentThreadId);
+            return new AgentCloseResponse(summary);
+        }
+
+        @Override
+        public AgentListResponse agentList(AgentListParams params) {
+            ensureReady();
+            ThreadId parentThreadId = params == null ? null : params.parentThreadId();
+            boolean recursive = params != null && params.recursive();
+            return new AgentListResponse(agentControl().listAgents(parentThreadId, recursive));
         }
 
         @Override
@@ -319,6 +540,186 @@ public class InProcessCodexAppServer implements CodexAppServer {
                     .toList();
         }
 
+        private boolean isBackgroundCommand(String command) {
+            if (command == null) {
+                return false;
+            }
+            String trimmed = command.trim();
+            return trimmed.endsWith("&") && !trimmed.endsWith("&&");
+        }
+
+        private ShellCommandResult launchBackgroundTerminal(ThreadId threadId, String command) {
+            String actualCommand = normalizeBackgroundCommand(command);
+            if (actualCommand.isBlank()) {
+                return new ShellCommandResult(
+                        false,
+                        command == null ? "" : command,
+                        -1,
+                        "",
+                        "",
+                        false,
+                        threadWorkspace(threadId),
+                        false,
+                        org.dean.codex.protocol.tool.CommandApprovalDecision.BLOCK,
+                        "Command must not be blank.",
+                        "Command must not be blank.");
+            }
+
+            Process process;
+            try {
+                process = new ProcessBuilder("zsh", "-lc", actualCommand + " & echo $!")
+                        .directory(Path.of(threadWorkspace(threadId)).toFile())
+                        .start();
+            }
+            catch (Exception exception) {
+                return new ShellCommandResult(
+                        false,
+                        command,
+                        -1,
+                        "",
+                        "",
+                        false,
+                        threadWorkspace(threadId),
+                        false,
+                        org.dean.codex.protocol.tool.CommandApprovalDecision.ALLOW,
+                        "Background terminal launch requested.",
+                        exception.getMessage());
+            }
+
+            String stdout;
+            String stderr;
+            try {
+                boolean finished = process.waitFor(5, TimeUnit.SECONDS);
+                stdout = finished ? readProcessOutput(process.getInputStream()) : "";
+                stderr = finished ? readProcessOutput(process.getErrorStream()) : "";
+                if (!finished) {
+                    process.destroyForcibly();
+                    return new ShellCommandResult(
+                            false,
+                            command,
+                            -1,
+                            "",
+                            "",
+                            false,
+                            threadWorkspace(threadId),
+                            false,
+                            org.dean.codex.protocol.tool.CommandApprovalDecision.ALLOW,
+                            "Background terminal launch requested.",
+                            "Background terminal launcher did not exit cleanly.");
+                }
+            }
+            catch (Exception exception) {
+                process.destroyForcibly();
+                return new ShellCommandResult(
+                        false,
+                        command,
+                        -1,
+                        "",
+                        "",
+                        false,
+                        threadWorkspace(threadId),
+                        false,
+                        org.dean.codex.protocol.tool.CommandApprovalDecision.ALLOW,
+                        "Background terminal launch requested.",
+                        exception.getMessage());
+            }
+
+            long pid = parseBackgroundPid(stdout);
+            if (pid < 1) {
+                return new ShellCommandResult(
+                        false,
+                        command,
+                        -1,
+                        stdout,
+                        stderr,
+                        false,
+                        threadWorkspace(threadId),
+                        false,
+                        org.dean.codex.protocol.tool.CommandApprovalDecision.ALLOW,
+                        "Background terminal launch requested.",
+                        "Unable to determine background process id.");
+            }
+
+            backgroundTerminals.computeIfAbsent(threadId, ignored -> new CopyOnWriteArrayList<>())
+                    .add(new BackgroundTerminalHandle(pid, command, threadWorkspace(threadId), Instant.now()));
+            return new ShellCommandResult(
+                    true,
+                    command,
+                    0,
+                    "Background terminal started (pid=%d).".formatted(pid),
+                    stderr,
+                    false,
+                    threadWorkspace(threadId),
+                    true,
+                    org.dean.codex.protocol.tool.CommandApprovalDecision.ALLOW,
+                    "Background terminal launch requested.",
+                    "");
+        }
+
+        private boolean terminateBackgroundTerminal(BackgroundTerminalHandle handle) {
+            if (handle == null) {
+                return false;
+            }
+            ProcessHandle.of(handle.pid()).ifPresent(processHandle -> {
+                if (processHandle.isAlive()) {
+                    processHandle.destroy();
+                    try {
+                        processHandle.onExit().get(1, TimeUnit.SECONDS);
+                    }
+                    catch (Exception ignored) {
+                        processHandle.destroyForcibly();
+                    }
+                }
+            });
+            return true;
+        }
+
+        private String threadWorkspace(ThreadId threadId) {
+            return runtimeGateway.listThreads().stream()
+                    .filter(thread -> thread.threadId().equals(threadId))
+                    .map(ThreadSummary::cwd)
+                    .filter(cwd -> cwd != null && !cwd.isBlank())
+                    .findFirst()
+                    .orElseGet(() -> Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize().toString());
+        }
+
+        private String normalizeBackgroundCommand(String command) {
+            if (command == null) {
+                return "";
+            }
+            String trimmed = command.trim();
+            if (!trimmed.endsWith("&") || trimmed.endsWith("&&")) {
+                return trimmed;
+            }
+            return trimmed.substring(0, trimmed.length() - 1).trim();
+        }
+
+        private long parseBackgroundPid(String stdout) {
+            if (stdout == null || stdout.isBlank()) {
+                return -1;
+            }
+            try {
+                return Long.parseLong(stdout.trim().split("\\s+")[0]);
+            }
+            catch (Exception exception) {
+                return -1;
+            }
+        }
+
+        private String readProcessOutput(java.io.InputStream stream) throws java.io.IOException {
+            try (java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.InputStreamReader(stream))) {
+                StringBuilder output = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (!output.isEmpty()) {
+                        output.append(System.lineSeparator());
+                    }
+                    output.append(line);
+                }
+                return output.toString();
+            }
+        }
+
         private void publishRuntimeNotification(RuntimeNotification notification) {
             if (notification == null || notification.turn() == null) {
                 return;
@@ -426,6 +827,23 @@ public class InProcessCodexAppServer implements CodexAppServer {
             }
             return limit;
         }
+
+        private AgentControl agentControl() {
+            if (runtimeGateway instanceof AgentControl agentControl) {
+                return agentControl;
+            }
+            throw new IllegalStateException("Agent control is not available");
+        }
+
+        private void publishMailboxUpdate(ThreadId threadId) {
+            AgentMailboxState mailbox = agentControl().mailboxState(threadId);
+            if (mailbox != null) {
+                publish(new AgentMailboxUpdatedNotification(mailbox));
+            }
+        }
+    }
+
+    private record BackgroundTerminalHandle(long pid, String command, String workingDirectory, Instant startedAt) {
     }
 
     private ThreadId requireThreadId(ThreadResumeParams params) {
@@ -442,6 +860,34 @@ public class InProcessCodexAppServer implements CodexAppServer {
         return params.threadId();
     }
 
+    private ThreadId requireThreadId(ThreadUnsubscribeParams params) {
+        if (params == null || params.threadId() == null) {
+            throw new IllegalArgumentException("threadId is required");
+        }
+        return params.threadId();
+    }
+
+    private ThreadId requireThreadId(ThreadNameSetParams params) {
+        if (params == null || params.threadId() == null) {
+            throw new IllegalArgumentException("threadId is required");
+        }
+        return params.threadId();
+    }
+
+    private ThreadId requireThreadId(ThreadMetadataUpdateParams params) {
+        if (params == null || params.threadId() == null) {
+            throw new IllegalArgumentException("threadId is required");
+        }
+        return params.threadId();
+    }
+
+    private ThreadId requireThreadId(ThreadShellCommandParams params) {
+        if (params == null || params.threadId() == null) {
+            throw new IllegalArgumentException("threadId is required");
+        }
+        return params.threadId();
+    }
+
     private ThreadId requireThreadId(ThreadCompactStartParams params) {
         if (params == null || params.threadId() == null) {
             throw new IllegalArgumentException("threadId is required");
@@ -450,6 +896,13 @@ public class InProcessCodexAppServer implements CodexAppServer {
     }
 
     private ThreadId requireThreadId(ThreadArchiveParams params) {
+        if (params == null || params.threadId() == null) {
+            throw new IllegalArgumentException("threadId is required");
+        }
+        return params.threadId();
+    }
+
+    private ThreadId requireThreadId(ThreadBackgroundTerminalsCleanParams params) {
         if (params == null || params.threadId() == null) {
             throw new IllegalArgumentException("threadId is required");
         }
@@ -496,5 +949,11 @@ public class InProcessCodexAppServer implements CodexAppServer {
             throw new IllegalArgumentException("threadId is required");
         }
         return params.threadId();
+    }
+
+    private void requireLoadedThread(ThreadId threadId) {
+        if (!runtimeGateway.loadedThreads().contains(threadId)) {
+            throw new IllegalStateException("Thread is not loaded: " + threadId.value());
+        }
     }
 }

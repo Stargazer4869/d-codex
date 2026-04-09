@@ -10,6 +10,7 @@ import org.dean.codex.core.conversation.ConversationStore;
 import org.dean.codex.core.history.ThreadHistoryStore;
 import org.dean.codex.core.runtime.CodexRuntimeGateway;
 import org.dean.codex.protocol.agent.AgentMessage;
+import org.dean.codex.protocol.agent.AgentMailboxState;
 import org.dean.codex.protocol.agent.AgentSpawnRequest;
 import org.dean.codex.protocol.agent.AgentStatus;
 import org.dean.codex.protocol.agent.AgentSummary;
@@ -51,6 +52,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
@@ -73,6 +75,8 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
     private final Map<TurnId, RunningTurn> runningTurns = new ConcurrentHashMap<>();
     private final Set<ThreadId> loadedThreadIds = ConcurrentHashMap.newKeySet();
     private final Map<ThreadId, ConcurrentLinkedQueue<AgentMessage>> pendingAgentInputs = new ConcurrentHashMap<>();
+    private final Map<ThreadId, AtomicLong> mailboxSequences = new ConcurrentHashMap<>();
+    private final Map<ThreadId, Instant> mailboxUpdatedAt = new ConcurrentHashMap<>();
 
     public DefaultCodexRuntimeGateway(ConversationStore conversationStore,
                                       TurnExecutor turnExecutor,
@@ -255,6 +259,27 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
 
     @Override
     public AgentSummary sendInput(ThreadId agentThreadId, AgentMessage message, boolean interrupt) {
+        return assignTask(agentThreadId, message, interrupt);
+    }
+
+    @Override
+    public AgentSummary sendMessage(ThreadId agentThreadId, AgentMessage message) {
+        requireThread(agentThreadId);
+        requireAgentThread(agentThreadId);
+        if (storedThreadSummary(agentThreadId).agentClosedAt() != null) {
+            throw new IllegalStateException("Agent is closed: " + agentThreadId.value());
+        }
+        AgentMessage normalizedMessage = new AgentMessage(
+                message == null ? null : message.senderThreadId(),
+                agentThreadId,
+                message == null ? null : message.content(),
+                message == null || message.createdAt() == null ? Instant.now() : message.createdAt());
+        enqueueAgentInput(agentThreadId, normalizedMessage);
+        return agentSummary(agentThreadId);
+    }
+
+    @Override
+    public AgentSummary assignTask(ThreadId agentThreadId, AgentMessage message, boolean interrupt) {
         requireThread(agentThreadId);
         requireAgentThread(agentThreadId);
         if (storedThreadSummary(agentThreadId).agentClosedAt() != null) {
@@ -283,27 +308,18 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
         List<ThreadId> targets = resolveAgentTargets(agentThreadIds);
         if (targets.isEmpty()) {
             Instant now = Instant.now();
-            return new AgentWaitResult(null, null, null, AgentStatus.NOT_FOUND, true, "No agents available to wait on.", "", now);
+            return new AgentWaitResult(null, null, null, AgentStatus.NOT_FOUND, true, "No agents available to wait on.", "", null, now);
         }
 
-        Map<ThreadId, AgentStatus> previousStatuses = new ConcurrentHashMap<>();
-        Map<ThreadId, AgentTurnSnapshot> previousSnapshots = new ConcurrentHashMap<>();
+        Map<ThreadId, AgentStatus> previousStatuses = new java.util.HashMap<>();
+        Map<ThreadId, AgentTurnSnapshot> previousSnapshots = new java.util.HashMap<>();
+        Map<ThreadId, AgentMailboxState> previousMailboxes = new java.util.HashMap<>();
         for (ThreadId target : targets) {
             AgentSummary summary = agentSummary(target);
             previousStatuses.put(target, summary.status());
-                AgentTurnSnapshot snapshot = latestAgentTurnSnapshot(target);
-                previousSnapshots.put(target, snapshot);
-                if (!hasPendingAgentInput(target) && !isActiveAgentStatus(summary.status()) && snapshot != null) {
-                    return new AgentWaitResult(
-                            target,
-                        snapshot.turnId(),
-                            summary.status(),
-                            summary.status(),
-                            false,
-                            "Agent is idle.",
-                            snapshot.finalAnswer(),
-                        Instant.now());
-            }
+            AgentTurnSnapshot snapshot = latestAgentTurnSnapshot(target);
+            previousSnapshots.put(target, snapshot);
+            previousMailboxes.put(target, mailboxState(target));
         }
 
         long deadline = System.nanoTime() + (timeoutMillis * 1_000_000L);
@@ -311,10 +327,10 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
             for (ThreadId target : targets) {
                 AgentSummary summary = agentSummary(target);
                 AgentTurnSnapshot snapshot = latestAgentTurnSnapshot(target);
-                boolean mailboxChanged = hasPendingAgentInput(target);
-                boolean statusChanged = summary.closed() || summary.status() != previousStatuses.get(target);
+                AgentMailboxState mailbox = mailboxState(target);
+                boolean mailboxChanged = !sameMailboxState(mailbox, previousMailboxes.get(target));
                 boolean producedTurn = !sameSnapshot(snapshot, previousSnapshots.get(target));
-                if (mailboxChanged || statusChanged || producedTurn) {
+                if (mailboxChanged || summary.closed() || producedTurn) {
                     return new AgentWaitResult(
                             target,
                             snapshot == null ? null : snapshot.turnId(),
@@ -322,11 +338,12 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
                             summary.status(),
                             false,
                             mailboxChanged
-                                    ? "Agent mailbox changed."
+                                    ? "Agent mailbox updated."
                                     : producedTurn
                                     ? "Agent produced a new turn result."
                                     : "Agent status changed.",
-                            snapshot == null ? "" : snapshot.finalAnswer(),
+                            "",
+                            mailbox,
                             Instant.now());
                 }
             }
@@ -342,6 +359,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
         ThreadId firstTarget = targets.get(0);
         AgentSummary summary = agentSummary(firstTarget);
         AgentTurnSnapshot snapshot = latestAgentTurnSnapshot(firstTarget);
+        AgentMailboxState mailbox = mailboxState(firstTarget);
         return new AgentWaitResult(
                 firstTarget,
                 snapshot == null ? null : snapshot.turnId(),
@@ -349,8 +367,18 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
                 summary.status(),
                 true,
                 "Wait timed out.",
-                snapshot == null ? "" : snapshot.finalAnswer(),
+                "",
+                mailbox,
                 Instant.now());
+    }
+
+    @Override
+    public AgentMailboxState mailboxState(ThreadId agentThreadId) {
+        requireThread(agentThreadId);
+        long sequence = mailboxSequences.getOrDefault(agentThreadId, new AtomicLong(0L)).get();
+        int pendingMessages = pendingAgentInputs.getOrDefault(agentThreadId, new ConcurrentLinkedQueue<>()).size();
+        Instant updatedAt = mailboxUpdatedAt.get(agentThreadId);
+        return new AgentMailboxState(agentThreadId, sequence, pendingMessages, updatedAt);
     }
 
     @Override
@@ -391,6 +419,8 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
                     summary.agentPath());
             loadedThreadIds.remove(threadId);
             pendingAgentInputs.remove(threadId);
+            mailboxSequences.remove(threadId);
+            mailboxUpdatedAt.remove(threadId);
         }
         return agentSummary(agentThreadId);
     }
@@ -457,6 +487,34 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
         conversationStore.archiveThread(threadId);
         loadedThreadIds.remove(threadId);
         return threadSummary(threadId);
+    }
+
+    @Override
+    public ThreadSummary renameThread(ThreadId threadId, String title) {
+        requireThread(threadId);
+        ThreadSummary updated = conversationStore.renameThread(threadId, title);
+        return runtimeThreadSummary(updated);
+    }
+
+    @Override
+    public ThreadSummary updateThreadMetadata(ThreadId threadId, String cwd, String modelProvider, String model) {
+        requireThread(threadId);
+        ThreadSummary updated = conversationStore.updateThreadMetadata(threadId, cwd, modelProvider, model);
+        return runtimeThreadSummary(updated);
+    }
+
+    @Override
+    public void unloadThread(ThreadId threadId) {
+        if (threadId == null) {
+            return;
+        }
+        loadedThreadIds.remove(threadId);
+    }
+
+    @Override
+    public int threadSubscriptionCount(ThreadId threadId) {
+        CopyOnWriteArrayList<Consumer<RuntimeNotification>> listeners = subscribers.get(threadId);
+        return listeners == null ? 0 : listeners.size();
     }
 
     @Override
@@ -551,7 +609,12 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
                 threadId,
                 ignored -> new CopyOnWriteArrayList<>());
         listeners.add(listener);
-        return () -> listeners.remove(listener);
+        return () -> {
+            listeners.remove(listener);
+            if (listeners.isEmpty()) {
+                subscribers.remove(threadId, listeners);
+            }
+        };
     }
 
     @PreDestroy
@@ -869,11 +932,26 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
             return;
         }
         pendingAgentInputs.computeIfAbsent(threadId, ignored -> new ConcurrentLinkedQueue<>()).add(message);
+        mailboxSequences.computeIfAbsent(threadId, ignored -> new AtomicLong(0L)).incrementAndGet();
+        mailboxUpdatedAt.put(threadId, message.createdAt() == null ? Instant.now() : message.createdAt());
     }
 
     private boolean hasPendingAgentInput(ThreadId threadId) {
         Queue<AgentMessage> mailbox = pendingAgentInputs.get(threadId);
         return mailbox != null && !mailbox.isEmpty();
+    }
+
+    private boolean sameMailboxState(AgentMailboxState left, AgentMailboxState right) {
+        if (left == right) {
+            return true;
+        }
+        if (left == null || right == null) {
+            return false;
+        }
+        return left.sequence() == right.sequence()
+                && left.pendingMessages() == right.pendingMessages()
+                && java.util.Objects.equals(left.updatedAt(), right.updatedAt())
+                && java.util.Objects.equals(left.threadId(), right.threadId());
     }
 
     private boolean isActiveAgentStatus(AgentStatus status) {

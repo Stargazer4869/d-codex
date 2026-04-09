@@ -8,10 +8,12 @@ import org.dean.codex.protocol.history.HistoryPlanItem;
 import org.dean.codex.protocol.history.HistoryRuntimeErrorItem;
 import org.dean.codex.protocol.history.HistorySkillUseItem;
 import org.dean.codex.protocol.history.HistoryToolCallItem;
+import org.dean.codex.protocol.history.HistoryCollabToolCallItem;
 import org.dean.codex.protocol.history.HistoryToolResultItem;
 import org.dean.codex.protocol.history.ThreadHistoryItem;
 import org.dean.codex.protocol.item.AgentMessageItem;
 import org.dean.codex.protocol.item.ApprovalItem;
+import org.dean.codex.protocol.item.CollabToolCallItem;
 import org.dean.codex.protocol.item.PlanItem;
 import org.dean.codex.protocol.item.RuntimeErrorItem;
 import org.dean.codex.protocol.item.SkillUseItem;
@@ -49,6 +51,21 @@ public final class ThreadHistoryMapper {
         }
         if (item instanceof ToolResultItem toolResultItem) {
             return List.of(new HistoryToolResultItem(turnId, toolResultItem.toolName(), toolResultItem.summary(), toolResultItem.createdAt()));
+        }
+        if (item instanceof CollabToolCallItem collabToolCallItem) {
+            return List.of(new HistoryCollabToolCallItem(
+                    turnId,
+                    collabToolCallItem.tool(),
+                    collabToolCallItem.status(),
+                    collabToolCallItem.deliveryState(),
+                    collabToolCallItem.senderThreadId(),
+                    collabToolCallItem.receiverThreadIds(),
+                    collabToolCallItem.newThreadId(),
+                    collabToolCallItem.prompt(),
+                    collabToolCallItem.agentStatuses(),
+                    collabToolCallItem.mailboxes(),
+                    collabToolCallItem.wakeupCause(),
+                    collabToolCallItem.createdAt()));
         }
         if (item instanceof ApprovalItem approvalItem) {
             return List.of(new HistoryApprovalItem(

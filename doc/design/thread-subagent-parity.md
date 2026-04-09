@@ -8,16 +8,19 @@ Move the Java Codex rebuild from single-thread REPL-style session handling to Co
 
 Today the Java implementation has:
 
-- basic thread lifecycle only: `thread/start`, `thread/resume`, `thread/list`, `thread/read`, and `thread/compact/start`
-- thin thread metadata centered on `ThreadSummary`
-- no archive, fork, rollback, or loaded-thread model
-- no sub-agent runtime, protocol, persistence, or CLI UX
+- thread lifecycle plus the first Codex-style extensions: `thread/start`, `thread/resume`, `thread/list`, `thread/read`, `thread/compact/start`, `thread/fork`, `thread/archive`, `thread/unarchive`, `thread/rollback`, `thread/unsubscribe`, `thread/name/set`, and a minimal `thread/metadata/update`
+- thread metadata centered on `ThreadSummary`, still much thinner than Codex's full metadata model
+- loaded-thread tracking, with Codex-style connection-scoped unload semantics plus the first reattachment-safe resume behavior
+- thread-scoped shell execution now has an explicit background-terminal cleanup slice, but lifecycle tracking is still much smaller than Codex
+- sub-agent runtime, persistence, and CLI UX are present in a first pass, and the existing control primitives are now exposed through the app-server/protocol boundary, but the collaboration model is still not Codex-grade
+- the collaboration split now distinguishes queue-only messaging from task-triggering assignment, but mailbox-style semantics are still missing
 
 Target behavior is:
 
 - threads are first-class runtime objects with lifecycle, status, filters, and richer metadata
 - thread operations include fork, archive, unarchive, rollback, and loaded-thread discovery
 - sub-agents can be spawned, messaged, waited on, resumed, listed, and closed
+- sub-agent messaging should distinguish queue-only messages from task-triggering assignments
 - thread and sub-agent state is navigable from the CLI and app-server
 
 ## Delivery Cutlines
@@ -220,6 +223,7 @@ Scope:
 
 - add `spawn_agent`, `send_input`, `wait_agent`, `resume_agent`, `close_agent`, and `list_agents`
 - support structured inter-agent messaging and lifecycle events
+- add mailbox-oriented wait semantics with a monotonic mailbox sequence and mailbox update notifications
 - start with a minimal shape, but keep a path toward MultiAgentV2-style behavior
 
 Acceptance:
@@ -228,6 +232,7 @@ Acceptance:
 - [x] spawn agents with task name, role, and optional overrides
 - [x] support queueing messages to existing agents
 - [x] support waiting, resuming, listing, and closing agents
+- [x] surface mailbox updates through the app-server protocol
 
 Likely touch points:
 

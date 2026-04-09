@@ -113,6 +113,25 @@ public class InMemoryConversationStore implements ConversationStore {
     }
 
     @Override
+    public synchronized ThreadSummary renameThread(ThreadId threadId, String title) {
+        ThreadRecord record = requireThread(threadId);
+        ThreadRecord updated = record.withTitle(title);
+        threads.put(threadId, updated);
+        return toThreadSummary(threadId, updated);
+    }
+
+    @Override
+    public synchronized ThreadSummary updateThreadMetadata(ThreadId threadId,
+                                                           String cwd,
+                                                           String modelProvider,
+                                                           String model) {
+        ThreadRecord record = requireThread(threadId);
+        ThreadRecord updated = record.withMetadata(cwd, modelProvider, model);
+        threads.put(threadId, updated);
+        return toThreadSummary(threadId, updated);
+    }
+
+    @Override
     public synchronized boolean exists(ThreadId threadId) {
         return threads.containsKey(threadId);
     }
@@ -490,6 +509,58 @@ public class InMemoryConversationStore implements ConversationStore {
 
         private List<ConversationTurn> turns() {
             return turns;
+        }
+
+        private ThreadRecord withTitle(String newTitle) {
+            String safeTitle = newTitle == null || newTitle.isBlank() ? title : newTitle.trim();
+            return new ThreadRecord(
+                    safeTitle,
+                    threadId,
+                    createdAt,
+                    Instant.now(),
+                    preview == null || preview.isBlank() || preview.equals(title) ? safeTitle : preview,
+                    ephemeral,
+                    modelProvider,
+                    model,
+                    cwd,
+                    source,
+                    materialized,
+                    archivedAt,
+                    agentNickname,
+                    agentRole,
+                    agentPath,
+                    parentThreadId,
+                    agentDepth,
+                    agentClosedAt,
+                    new ArrayList<>(turns));
+        }
+
+        private ThreadRecord withMetadata(String newCwd, String newModelProvider, String newModel) {
+            return new ThreadRecord(
+                    title,
+                    threadId,
+                    createdAt,
+                    Instant.now(),
+                    preview,
+                    ephemeral,
+                    normalizeText(newModelProvider, modelProvider),
+                    normalizeText(newModel, model),
+                    normalizeText(newCwd, cwd),
+                    source,
+                    materialized,
+                    archivedAt,
+                    agentNickname,
+                    agentRole,
+                    agentPath,
+                    parentThreadId,
+                    agentDepth,
+                    agentClosedAt,
+                    new ArrayList<>(turns));
+        }
+
+        private String normalizeText(String value, String current) {
+            String normalized = value == null ? null : value.trim();
+            return normalized == null || normalized.isBlank() ? current : normalized;
         }
     }
 

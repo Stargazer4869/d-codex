@@ -16,6 +16,7 @@ public record AgentWaitResult(ThreadId threadId,
                               boolean timedOut,
                               String message,
                               String finalAnswer,
+                              AgentMailboxState mailbox,
                               Instant completedAt) {
 
     public AgentWaitResult {

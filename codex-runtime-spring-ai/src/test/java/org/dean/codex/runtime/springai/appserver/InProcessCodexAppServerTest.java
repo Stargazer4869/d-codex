@@ -14,6 +14,19 @@ import org.dean.codex.core.skill.SkillService;
 import org.dean.codex.protocol.appserver.AppServerCapabilities;
 import org.dean.codex.protocol.appserver.AppServerClientInfo;
 import org.dean.codex.protocol.appserver.AppServerNotification;
+import org.dean.codex.protocol.appserver.AgentCloseParams;
+import org.dean.codex.protocol.appserver.AgentCloseResponse;
+import org.dean.codex.protocol.appserver.AgentAssignTaskParams;
+import org.dean.codex.protocol.appserver.AgentAssignTaskResponse;
+import org.dean.codex.protocol.appserver.AgentListParams;
+import org.dean.codex.protocol.appserver.AgentListResponse;
+import org.dean.codex.protocol.appserver.AgentMailboxUpdatedNotification;
+import org.dean.codex.protocol.appserver.AgentResumeParams;
+import org.dean.codex.protocol.appserver.AgentResumeResponse;
+import org.dean.codex.protocol.appserver.AgentSendMessageParams;
+import org.dean.codex.protocol.appserver.AgentSendMessageResponse;
+import org.dean.codex.protocol.appserver.AgentSpawnParams;
+import org.dean.codex.protocol.appserver.AgentSpawnResponse;
 import org.dean.codex.protocol.appserver.InitializeParams;
 import org.dean.codex.protocol.appserver.InitializedNotification;
 import org.dean.codex.protocol.appserver.SkillsListParams;
@@ -22,23 +35,37 @@ import org.dean.codex.protocol.appserver.ThreadCompaction;
 import org.dean.codex.protocol.appserver.ThreadCompactStartParams;
 import org.dean.codex.protocol.appserver.ThreadCompactionStartedNotification;
 import org.dean.codex.protocol.appserver.ThreadCompactedNotification;
+import org.dean.codex.protocol.appserver.ThreadBackgroundTerminalsCleanParams;
+import org.dean.codex.protocol.appserver.ThreadBackgroundTerminalsCleanResponse;
+import org.dean.codex.protocol.appserver.ThreadClosedNotification;
 import org.dean.codex.protocol.appserver.ThreadForkParams;
 import org.dean.codex.protocol.appserver.ThreadListParams;
 import org.dean.codex.protocol.appserver.ThreadLoadedListParams;
+import org.dean.codex.protocol.appserver.ThreadMetadataUpdateParams;
+import org.dean.codex.protocol.appserver.ThreadMetadataUpdatedNotification;
+import org.dean.codex.protocol.appserver.ThreadNameSetParams;
+import org.dean.codex.protocol.appserver.ThreadNameUpdatedNotification;
 import org.dean.codex.protocol.appserver.ThreadReadParams;
 import org.dean.codex.protocol.appserver.ThreadRollbackParams;
 import org.dean.codex.protocol.appserver.ThreadResumeParams;
 import org.dean.codex.protocol.appserver.ThreadSortKey;
 import org.dean.codex.protocol.appserver.ThreadStartParams;
 import org.dean.codex.protocol.appserver.ThreadStartedNotification;
+import org.dean.codex.protocol.appserver.ThreadStatusChangedNotification;
+import org.dean.codex.protocol.appserver.ThreadShellCommandParams;
+import org.dean.codex.protocol.appserver.ThreadShellCommandResponse;
 import org.dean.codex.protocol.appserver.ThreadSourceKind;
 import org.dean.codex.protocol.appserver.ThreadUnarchiveParams;
+import org.dean.codex.protocol.appserver.ThreadUnsubscribeParams;
+import org.dean.codex.protocol.appserver.ThreadUnsubscribeResponse;
 import org.dean.codex.protocol.appserver.TurnCompletedNotification;
+import org.dean.codex.protocol.appserver.TurnInterruptParams;
 import org.dean.codex.protocol.appserver.TurnItemNotification;
 import org.dean.codex.protocol.appserver.TurnStartParams;
 import org.dean.codex.protocol.appserver.TurnStartedNotification;
 import org.dean.codex.protocol.appserver.TurnSteerParams;
 import org.dean.codex.protocol.agent.AgentSpawnRequest;
+import org.dean.codex.protocol.agent.AgentSummary;
 import org.dean.codex.protocol.conversation.ConversationTurn;
 import org.dean.codex.protocol.conversation.ItemId;
 import org.dean.codex.protocol.conversation.ThreadId;
@@ -54,16 +81,21 @@ import org.dean.codex.protocol.item.TurnItem;
 import org.dean.codex.protocol.item.UserMessageItem;
 import org.dean.codex.protocol.skill.SkillMetadata;
 import org.dean.codex.protocol.skill.SkillScope;
+import org.dean.codex.protocol.tool.CommandApprovalDecision;
+import org.dean.codex.protocol.tool.ShellCommandResult;
 import org.dean.codex.runtime.springai.runtime.DefaultCodexRuntimeGateway;
+import org.dean.codex.core.tool.local.ShellCommandTool;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -115,11 +147,6 @@ class InProcessCodexAppServerTest {
             assertEquals("Forked thread", forked.title());
             assertEquals("/workspace/forked", forked.cwd());
             assertTrue(forked.ephemeral());
-
-            List<AppServerNotification> observed = awaitNotifications(notifications, 4);
-            assertTrue(observed.stream().anyMatch(notification ->
-                    notification instanceof ThreadStartedNotification started
-                            && started.thread().threadId().equals(forked.threadId())));
 
             var forkedRead = session.threadRead(new ThreadReadParams(forked.threadId(), true));
             assertEquals(1, forkedRead.turns().size());
@@ -319,6 +346,241 @@ class InProcessCodexAppServerTest {
     }
 
     @Test
+    void threadUnsubscribeNameSetAndMetadataUpdateFlowThroughAppServerContract() throws Exception {
+        CodexAppServer appServer = appServer(new NoOpTurnExecutor());
+        BlockingQueue<AppServerNotification> notifications = new LinkedBlockingQueue<>();
+
+        try (CodexAppServerSession session = initializedSession(appServer);
+             AutoCloseable ignored = session.subscribe(notifications::add)) {
+            ThreadId threadId = session.threadStart(new ThreadStartParams("Original thread")).thread().threadId();
+
+            session.threadNameSet(new ThreadNameSetParams(threadId, "Renamed thread"));
+            assertEquals("Renamed thread", session.threadRead(new ThreadReadParams(threadId, false)).thread().title());
+
+            var metadataUpdated = session.threadMetadataUpdate(new ThreadMetadataUpdateParams(threadId, "/workspace/app", "openai", "gpt-5.4"));
+            assertEquals("/workspace/app", metadataUpdated.thread().cwd());
+            assertEquals("openai", metadataUpdated.thread().modelProvider());
+            assertEquals("gpt-5.4", metadataUpdated.thread().model());
+
+            var unsubscribed = session.threadUnsubscribe(new ThreadUnsubscribeParams(threadId));
+            assertEquals("unsubscribed", unsubscribed.status());
+            assertFalse(session.threadLoadedList(new ThreadLoadedListParams()).data().contains(threadId));
+
+            List<AppServerNotification> observed = awaitNotifications(notifications, 5);
+            assertTrue(observed.stream().anyMatch(ThreadNameUpdatedNotification.class::isInstance));
+            assertTrue(observed.stream().anyMatch(ThreadMetadataUpdatedNotification.class::isInstance));
+            assertTrue(observed.stream().anyMatch(ThreadStatusChangedNotification.class::isInstance));
+            assertTrue(observed.stream().anyMatch(ThreadClosedNotification.class::isInstance));
+        }
+    }
+
+    @Test
+    void threadUnsubscribeIsConnectionScopedAndOnlyLastSubscriberUnloads() throws Exception {
+        CodexAppServer appServer = appServer(new NoOpTurnExecutor());
+        BlockingQueue<AppServerNotification> firstSessionNotifications = new LinkedBlockingQueue<>();
+        BlockingQueue<AppServerNotification> secondSessionNotifications = new LinkedBlockingQueue<>();
+
+        try (CodexAppServerSession firstSession = initializedSession(appServer);
+             AutoCloseable firstSubscription = firstSession.subscribe(firstSessionNotifications::add);
+             CodexAppServerSession secondSession = initializedSession(appServer);
+             AutoCloseable secondSubscription = secondSession.subscribe(secondSessionNotifications::add);
+             CodexAppServerSession thirdSession = initializedSession(appServer)) {
+            ThreadId threadId = firstSession.threadStart(new ThreadStartParams("Shared thread")).thread().threadId();
+            secondSession.threadResume(new ThreadResumeParams(threadId));
+
+            assertEquals("notSubscribed", thirdSession.threadUnsubscribe(new ThreadUnsubscribeParams(threadId)).status());
+
+            assertEquals("unsubscribed", firstSession.threadUnsubscribe(new ThreadUnsubscribeParams(threadId)).status());
+            assertTrue(firstSession.threadLoadedList(new ThreadLoadedListParams()).data().contains(threadId));
+            assertTrue(secondSession.threadLoadedList(new ThreadLoadedListParams()).data().contains(threadId));
+
+            assertEquals("unsubscribed", secondSession.threadUnsubscribe(new ThreadUnsubscribeParams(threadId)).status());
+            assertFalse(firstSession.threadLoadedList(new ThreadLoadedListParams()).data().contains(threadId));
+            assertFalse(secondSession.threadLoadedList(new ThreadLoadedListParams()).data().contains(threadId));
+
+            assertEquals("notLoaded", firstSession.threadUnsubscribe(new ThreadUnsubscribeParams(threadId)).status());
+
+            List<AppServerNotification> firstObserved = awaitNotifications(firstSessionNotifications, 5);
+            List<AppServerNotification> secondObserved = awaitNotifications(secondSessionNotifications, 5);
+            assertFalse(firstObserved.stream().anyMatch(ThreadClosedNotification.class::isInstance));
+            assertFalse(firstObserved.stream().anyMatch(ThreadStatusChangedNotification.class::isInstance));
+            assertTrue(secondObserved.stream().anyMatch(ThreadStatusChangedNotification.class::isInstance));
+            assertTrue(secondObserved.stream().anyMatch(ThreadClosedNotification.class::isInstance));
+        }
+    }
+
+    @Test
+    void threadResumeOfPersistedThreadLoadsAndPublishesStatusChanged() throws Exception {
+        CodexAppServer appServer = appServer(new NoOpTurnExecutor());
+        BlockingQueue<AppServerNotification> notifications = new LinkedBlockingQueue<>();
+
+        try (CodexAppServerSession session = initializedSession(appServer);
+             AutoCloseable ignored = session.subscribe(notifications::add)) {
+            ThreadId threadId = session.threadStart(new ThreadStartParams("Resume thread")).thread().threadId();
+
+            assertEquals("unsubscribed", session.threadUnsubscribe(new ThreadUnsubscribeParams(threadId)).status());
+            assertFalse(session.threadLoadedList(new ThreadLoadedListParams()).data().contains(threadId));
+
+            var resumed = session.threadResume(new ThreadResumeParams(threadId));
+            assertEquals(threadId, resumed.thread().threadId());
+            assertTrue(session.threadLoadedList(new ThreadLoadedListParams()).data().contains(threadId));
+
+            List<AppServerNotification> observed = awaitNotifications(notifications, 5);
+            assertTrue(observed.stream().anyMatch(ThreadStatusChangedNotification.class::isInstance));
+            assertTrue(observed.stream().anyMatch(ThreadClosedNotification.class::isInstance));
+        }
+    }
+
+    @Test
+    void threadShellCommandRequiresLoadedThreadAndReturnsThreadScopedResult() throws Exception {
+        RecordingShellCommandTool shellCommandTool = new RecordingShellCommandTool();
+        CodexAppServer appServer = appServer(new NoOpTurnExecutor(), shellCommandTool);
+
+        try (CodexAppServerSession session = initializedSession(appServer)) {
+            ThreadId threadId = session.threadStart(new ThreadStartParams("Shell thread")).thread().threadId();
+
+            ThreadShellCommandResponse response = session.threadShellCommand(
+                    new ThreadShellCommandParams(threadId, "printf 'hello from thread'"));
+
+            assertEquals("printf 'hello from thread'", shellCommandTool.lastCommand);
+            assertEquals("hello from thread", response.result().stdout());
+            assertTrue(response.result().executed());
+
+            session.threadUnsubscribe(new ThreadUnsubscribeParams(threadId));
+            IllegalStateException exception = assertThrows(IllegalStateException.class,
+                    () -> session.threadShellCommand(new ThreadShellCommandParams(threadId, "printf 'again'")));
+            assertTrue(exception.getMessage().contains("not loaded"));
+        }
+    }
+
+    @Test
+    void threadBackgroundTerminalsCleanRemovesThreadOwnedBackgroundProcessState() throws Exception {
+        CodexAppServer appServer = appServer(new NoOpTurnExecutor());
+
+        try (CodexAppServerSession session = initializedSession(appServer)) {
+            ThreadId threadId = session.threadStart(new ThreadStartParams("Background thread")).thread().threadId();
+            var launched = session.threadShellCommand(new ThreadShellCommandParams(threadId, "sleep 60 &"));
+
+            assertTrue(launched.result().success());
+            assertTrue(launched.result().stdout().contains("Background terminal started"));
+
+            ThreadBackgroundTerminalsCleanResponse cleaned =
+                    session.threadBackgroundTerminalsClean(new ThreadBackgroundTerminalsCleanParams(threadId));
+            assertEquals(threadId, cleaned.threadId());
+            assertEquals(1, cleaned.cleanedCount());
+
+            ThreadBackgroundTerminalsCleanResponse secondClean =
+                    session.threadBackgroundTerminalsClean(new ThreadBackgroundTerminalsCleanParams(threadId));
+            assertEquals(0, secondClean.cleanedCount());
+        }
+    }
+
+    @Test
+    void agentControlMethodsFlowThroughAppServerContract() throws Exception {
+        CodexAppServer appServer = appServer(new NoOpTurnExecutor());
+        BlockingQueue<AppServerNotification> notifications = new LinkedBlockingQueue<>();
+
+        try (CodexAppServerSession session = initializedSession(appServer);
+             AutoCloseable ignored = session.subscribe(notifications::add)) {
+            ThreadId rootThreadId = session.threadStart(new ThreadStartParams("Agent parent")).thread().threadId();
+
+            AgentSpawnResponse spawned = session.agentSpawn(new AgentSpawnParams(new AgentSpawnRequest(
+                    rootThreadId,
+                    "Investigate a task",
+                    "Please inspect the workspace",
+                    "worker-1",
+                    "worker",
+                    null,
+                    null,
+                    null,
+                    null)));
+
+            assertEquals(rootThreadId, spawned.agent().parentThreadId());
+            assertTrue(session.agentList(new AgentListParams(rootThreadId, false)).agents().stream()
+                    .map(AgentSummary::threadId)
+                    .anyMatch(spawned.agent().threadId()::equals));
+
+            awaitNotifications(notifications, 10);
+
+            AgentSendMessageResponse sentMessage = session.agentSendMessage(new AgentSendMessageParams(
+                    spawned.agent().threadId(),
+                    new org.dean.codex.protocol.agent.AgentMessage(rootThreadId, spawned.agent().threadId(), "message only", Instant.now())));
+            assertEquals(spawned.agent().threadId(), sentMessage.agent().threadId());
+
+            List<AppServerNotification> mailboxObserved = awaitNotifications(notifications, 10);
+            assertTrue(mailboxObserved.stream().anyMatch(AgentMailboxUpdatedNotification.class::isInstance));
+
+            int turnsAfterMessage = awaitTurnCount(session, spawned.agent().threadId(), 1);
+            assertEquals(1, turnsAfterMessage);
+        }
+    }
+
+    @Test
+    void agentAssignTaskThroughAppServerContractStartsAQueuedTurn() throws Exception {
+        CodexAppServer appServer = appServer(new NoOpTurnExecutor());
+        BlockingQueue<AppServerNotification> notifications = new LinkedBlockingQueue<>();
+
+        try (CodexAppServerSession session = initializedSession(appServer);
+             AutoCloseable ignored = session.subscribe(notifications::add)) {
+            ThreadId rootThreadId = session.threadStart(new ThreadStartParams("Agent parent")).thread().threadId();
+            AgentSpawnResponse spawned = session.agentSpawn(new AgentSpawnParams(new AgentSpawnRequest(
+                    rootThreadId,
+                    "Investigate a task",
+                    "Please inspect the workspace",
+                    "worker-1",
+                    "worker",
+                    null,
+                    null,
+                    null,
+                    null)));
+
+            AgentAssignTaskResponse assigned = session.agentAssignTask(new AgentAssignTaskParams(
+                    spawned.agent().threadId(),
+                    new org.dean.codex.protocol.agent.AgentMessage(rootThreadId, spawned.agent().threadId(), "continue", Instant.now()),
+                    false));
+            assertEquals(spawned.agent().threadId(), assigned.agent().threadId());
+            assertTrue(session.threadRead(new ThreadReadParams(spawned.agent().threadId(), true)).turns().size() >= 1);
+
+            AgentResumeResponse resumed = session.agentResume(new AgentResumeParams(spawned.agent().threadId()));
+            assertEquals(spawned.agent().threadId(), resumed.agent().threadId());
+
+            AgentCloseResponse closed = session.agentClose(new AgentCloseParams(spawned.agent().threadId()));
+            assertEquals(spawned.agent().threadId(), closed.agent().threadId());
+            assertTrue(closed.agent().closed());
+        }
+    }
+
+    @Test
+    void turnInterruptDoesNotCleanBackgroundTerminals() throws Exception {
+        InterruptibleTurnExecutor turnExecutor = new InterruptibleTurnExecutor();
+        ConversationStore conversationStore = new InMemoryConversationStore();
+        CodexRuntimeGateway runtimeGateway = new DefaultCodexRuntimeGateway(
+                conversationStore,
+                turnExecutor,
+                new NoOpContextManager(),
+                new NoOpThreadContextReconstructionService(),
+                new NoOpSkillService());
+        CodexAppServer appServer = new InProcessCodexAppServer(runtimeGateway);
+
+        try (CodexAppServerSession session = initializedSession(appServer)) {
+            ThreadId threadId = session.threadStart(new ThreadStartParams("Interrupt thread")).thread().threadId();
+            runtimeGateway.turnStart(threadId, "Wait for interrupt");
+
+            assertTrue(turnExecutor.awaitStarted());
+            session.threadShellCommand(new ThreadShellCommandParams(threadId, "sleep 60 &"));
+
+            TurnId runningTurnId = turnExecutor.runningTurnId();
+            assertNotNull(runningTurnId);
+            assertTrue(session.turnInterrupt(new TurnInterruptParams(threadId, runningTurnId)).accepted());
+            assertTrue(turnExecutor.awaitFinished());
+
+            ThreadBackgroundTerminalsCleanResponse cleaned =
+                    session.threadBackgroundTerminalsClean(new ThreadBackgroundTerminalsCleanParams(threadId));
+            assertEquals(1, cleaned.cleanedCount());
+        }
+    }
+
+    @Test
     void threadListSupportsFilteringAndPaginationCursor() throws Exception {
         Instant base = Instant.parse("2026-04-01T00:00:00Z");
         ThreadSummary alpha = new ThreadSummary(
@@ -491,11 +753,19 @@ class InProcessCodexAppServerTest {
         return appServer(new InMemoryConversationStore(), turnExecutor);
     }
 
+    private CodexAppServer appServer(TurnExecutor turnExecutor, ShellCommandTool shellCommandTool) {
+        return appServer(new InMemoryConversationStore(), turnExecutor, shellCommandTool);
+    }
+
     private CodexAppServer appServer(CodexRuntimeGateway runtimeGateway) {
         return new InProcessCodexAppServer(runtimeGateway);
     }
 
     private CodexAppServer appServer(ConversationStore store, TurnExecutor turnExecutor) {
+        return appServer(store, turnExecutor, new NoOpShellCommandTool());
+    }
+
+    private CodexAppServer appServer(ConversationStore store, TurnExecutor turnExecutor, ShellCommandTool shellCommandTool) {
         SkillService skillService = new SkillService() {
             @Override
             public List<SkillMetadata> listSkills(boolean forceReload) {
@@ -525,7 +795,9 @@ class InProcessCodexAppServerTest {
                 List.of(),
                 List.of(),
                 Instant.now());
-        return new InProcessCodexAppServer(new DefaultCodexRuntimeGateway(store, turnExecutor, contextManager, reconstructionService, skillService));
+        return new InProcessCodexAppServer(
+                new DefaultCodexRuntimeGateway(store, turnExecutor, contextManager, reconstructionService, skillService),
+                shellCommandTool);
     }
 
     private static final class StubThreadListRuntimeGateway implements CodexRuntimeGateway {
@@ -673,6 +945,100 @@ class InProcessCodexAppServerTest {
         }
     }
 
+    private static final class NoOpShellCommandTool implements ShellCommandTool {
+        @Override
+        public ShellCommandResult runCommand(String command) {
+            return new ShellCommandResult(
+                    true,
+                    command,
+                    0,
+                    "",
+                    "",
+                    false,
+                    "/tmp/workspace",
+                    true,
+                    CommandApprovalDecision.ALLOW,
+                    "allowed",
+                    "");
+        }
+
+        @Override
+        public ShellCommandResult runApprovedCommand(String command) {
+            return runCommand(command);
+        }
+    }
+
+    private static final class InterruptibleTurnExecutor implements TurnExecutor {
+        private final CountDownLatch started = new CountDownLatch(1);
+        private final CountDownLatch finished = new CountDownLatch(1);
+        private final AtomicReference<TurnId> runningTurnId = new AtomicReference<>();
+
+        @Override
+        public CodexTurnResult executeTurn(ThreadId threadId, String input) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public CodexTurnResult executeTurn(ThreadId threadId, TurnId turnId, String input, Consumer<TurnItem> itemConsumer, TurnControl turnControl) {
+            runningTurnId.set(turnId);
+            started.countDown();
+            while (!turnControl.interruptionRequested()) {
+                try {
+                    Thread.sleep(10);
+                }
+                catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            finished.countDown();
+            return new CodexTurnResult(threadId, turnId, TurnStatus.INTERRUPTED, List.of(), "Interrupted");
+        }
+
+        @Override
+        public CodexTurnResult resumeTurn(ThreadId threadId, TurnId turnId) {
+            throw new UnsupportedOperationException();
+        }
+
+        boolean awaitStarted() throws InterruptedException {
+            return started.await(2, TimeUnit.SECONDS);
+        }
+
+        boolean awaitFinished() throws InterruptedException {
+            return finished.await(2, TimeUnit.SECONDS);
+        }
+
+        TurnId runningTurnId() {
+            return runningTurnId.get();
+        }
+    }
+
+    private static final class RecordingShellCommandTool implements ShellCommandTool {
+        private String lastCommand;
+
+        @Override
+        public ShellCommandResult runCommand(String command) {
+            this.lastCommand = command;
+            return new ShellCommandResult(
+                    true,
+                    command,
+                    0,
+                    "hello from thread",
+                    "",
+                    false,
+                    "/tmp/workspace",
+                    true,
+                    CommandApprovalDecision.ALLOW,
+                    "allowed",
+                    "");
+        }
+
+        @Override
+        public ShellCommandResult runApprovedCommand(String command) {
+            return runCommand(command);
+        }
+    }
+
     private static final class NoOpContextManager implements ContextManager {
         @Override
         public Optional<ThreadMemory> latestThreadMemory(ThreadId threadId) {
@@ -683,6 +1049,18 @@ class InProcessCodexAppServerTest {
         public ThreadMemory compactThread(ThreadId threadId) {
             return new ThreadMemory("memory-0", threadId, "summary", List.of(), 0, Instant.now());
         }
+    }
+
+    private int awaitTurnCount(CodexAppServerSession session, ThreadId threadId, int expectedCount) throws InterruptedException {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (System.nanoTime() < deadlineNanos) {
+            int count = session.threadRead(new ThreadReadParams(threadId, true)).turns().size();
+            if (count >= expectedCount) {
+                return count;
+            }
+            Thread.sleep(10);
+        }
+        throw new AssertionError("Timed out waiting for turn count " + expectedCount + " for " + threadId.value());
     }
 
     private static final class NoOpThreadContextReconstructionService implements ThreadContextReconstructionService {

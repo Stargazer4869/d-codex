@@ -34,6 +34,13 @@ public interface ConversationStore {
                                     String agentRole,
                                     String agentPath);
 
+    ThreadSummary renameThread(ThreadId threadId, String title);
+
+    ThreadSummary updateThreadMetadata(ThreadId threadId,
+                                       String cwd,
+                                       String modelProvider,
+                                       String model);
+
     boolean exists(ThreadId threadId);
 
     TurnId startTurn(ThreadId threadId, String userInput, Instant startedAt);

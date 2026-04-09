@@ -205,6 +205,39 @@ public class FileSystemConversationStore implements ConversationStore {
     }
 
     @Override
+    public synchronized ThreadSummary renameThread(ThreadId threadId, String title) {
+        ThreadMetadata metadata = requireThread(threadId);
+        Instant now = Instant.now();
+        ThreadMetadata updatedMetadata = metadata.withTitle(title).withUpdatedAt(now);
+        try {
+            writeJson(threadMetadataFile(threadId), updatedMetadata);
+            return toThreadSummary(threadId, updatedMetadata);
+        }
+        catch (IOException exception) {
+            throw new IllegalStateException("Unable to rename thread " + threadId.value(), exception);
+        }
+    }
+
+    @Override
+    public synchronized ThreadSummary updateThreadMetadata(ThreadId threadId,
+                                                           String cwd,
+                                                           String modelProvider,
+                                                           String model) {
+        ThreadMetadata metadata = requireThread(threadId);
+        Instant now = Instant.now();
+        ThreadMetadata updatedMetadata = metadata
+                .withMetadata(cwd, modelProvider, model)
+                .withUpdatedAt(now);
+        try {
+            writeJson(threadMetadataFile(threadId), updatedMetadata);
+            return toThreadSummary(threadId, updatedMetadata);
+        }
+        catch (IOException exception) {
+            throw new IllegalStateException("Unable to update thread metadata for " + threadId.value(), exception);
+        }
+    }
+
+    @Override
     public synchronized boolean exists(ThreadId threadId) {
         return threadId != null && Files.exists(threadMetadataFile(threadId));
     }
@@ -629,6 +662,50 @@ public class FileSystemConversationStore implements ConversationStore {
                     agentPath);
         }
 
+        private ThreadMetadata withTitle(String newTitle) {
+            String safeTitle = newTitle == null || newTitle.isBlank() ? title : newTitle.trim();
+            String newPreview = preview == null || preview.isBlank() || preview.equals(title) ? safeTitle : preview;
+            return new ThreadMetadata(
+                    threadId,
+                    safeTitle,
+                    createdAt,
+                    updatedAt,
+                    newPreview,
+                    ephemeral,
+                    modelProvider,
+                    model,
+                    cwd,
+                    source,
+                    archivedAt,
+                    parentThreadId,
+                    agentDepth,
+                    agentClosedAt,
+                    agentNickname,
+                    agentRole,
+                    agentPath);
+        }
+
+        private ThreadMetadata withMetadata(String newCwd, String newModelProvider, String newModel) {
+            return new ThreadMetadata(
+                    threadId,
+                    title,
+                    createdAt,
+                    updatedAt,
+                    preview,
+                    ephemeral,
+                    normalizeMetadataField(newModelProvider, modelProvider),
+                    normalizeMetadataField(newModel, model),
+                    normalizeMetadataField(newCwd, cwd),
+                    source,
+                    archivedAt,
+                    parentThreadId,
+                    agentDepth,
+                    agentClosedAt,
+                    agentNickname,
+                    agentRole,
+                    agentPath);
+        }
+
         private ThreadMetadata withArchivedAt(Instant newArchivedAt) {
             return new ThreadMetadata(
                     threadId,
@@ -758,6 +835,11 @@ public class FileSystemConversationStore implements ConversationStore {
         private static String normalizeAgentField(String value) {
             String normalized = value == null ? "" : value.trim();
             return normalized.isEmpty() ? null : normalized;
+        }
+
+        private static String normalizeMetadataField(String value, String current) {
+            String normalized = value == null ? null : value.trim();
+            return normalized == null || normalized.isBlank() ? current : normalized;
         }
     }
 }

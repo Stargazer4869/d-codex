@@ -3,8 +3,12 @@ package org.dean.codex.protocol.history;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.dean.codex.protocol.conversation.MessageRole;
+import org.dean.codex.protocol.agent.AgentMailboxState;
 import org.dean.codex.protocol.conversation.TurnId;
+import org.dean.codex.protocol.conversation.ThreadId;
 import org.dean.codex.protocol.item.ApprovalState;
+import org.dean.codex.protocol.item.CollabDeliveryState;
+import org.dean.codex.protocol.item.CollabToolCallStatus;
 import org.dean.codex.protocol.planning.EditPlan;
 import org.dean.codex.protocol.planning.PlannedEdit;
 import org.dean.codex.protocol.planning.PlannedEditType;
@@ -30,12 +34,25 @@ class ThreadHistoryItemJsonTest {
                 new HistoryMessageItem(new TurnId("turn-1"), MessageRole.USER, "Inspect repo", now),
                 new HistoryToolCallItem(new TurnId("turn-1"), "READ_FILE", "README.md", now.plusSeconds(1)),
                 new HistoryToolResultItem(new TurnId("turn-1"), "READ_FILE", "success path=README.md", now.plusSeconds(2)),
+                new HistoryCollabToolCallItem(
+                        new TurnId("turn-1"),
+                        "spawn_agent",
+                        CollabToolCallStatus.COMPLETED,
+                        CollabDeliveryState.DISPATCHED,
+                        new ThreadId("thread-parent"),
+                        List.of(new ThreadId("thread-agent")),
+                        new ThreadId("thread-agent"),
+                        "inspect repository",
+                        java.util.Map.of("thread-agent", org.dean.codex.protocol.agent.AgentStatus.IDLE),
+                        java.util.Map.of("thread-agent", new AgentMailboxState(new ThreadId("thread-agent"), 1L, 0, now.plusSeconds(3))),
+                        "mailbox_event",
+                        now.plusSeconds(3)),
                 new HistoryPlanItem(
                         new TurnId("turn-2"),
                         new EditPlan(
                                 "Update docs",
                                 List.of(new PlannedEdit("README.md", PlannedEditType.MODIFY, "Clarify setup"))),
-                        now.plusSeconds(3)),
+                        now.plusSeconds(4)),
                 new HistorySkillUseItem(
                         new TurnId("turn-2"),
                         List.of(new SkillMetadata(
@@ -45,22 +62,22 @@ class ThreadHistoryItemJsonTest {
                                 "skills/doc-reader",
                                 SkillScope.WORKSPACE,
                                 true)),
-                        now.plusSeconds(4)),
+                        now.plusSeconds(5)),
                 new HistoryApprovalItem(
                         new TurnId("turn-3"),
                         ApprovalState.APPROVED,
                         "approval-1",
                         "echo ok",
                         "Approved by user",
-                        now.plusSeconds(5)),
+                        now.plusSeconds(6)),
                 new CompactedHistoryItem(
                         "Compacted earlier thread context.",
                         List.of(
-                                new HistoryCompactionSummaryItem(new TurnId("turn-1"), "Compacted earlier thread context.", now.plusSeconds(6)),
-                                new HistoryToolResultItem(new TurnId("turn-4"), "SEARCH_FILES", "2 matches", now.plusSeconds(7))),
-                        now.plusSeconds(8),
+                                new HistoryCompactionSummaryItem(new TurnId("turn-1"), "Compacted earlier thread context.", now.plusSeconds(7)),
+                                new HistoryToolResultItem(new TurnId("turn-4"), "SEARCH_FILES", "2 matches", now.plusSeconds(8))),
+                        now.plusSeconds(9),
                         CompactionStrategy.LOCAL_SUMMARY),
-                new HistoryRuntimeErrorItem(new TurnId("turn-5"), "Synthetic runtime error", now.plusSeconds(9)));
+                new HistoryRuntimeErrorItem(new TurnId("turn-5"), "Synthetic runtime error", now.plusSeconds(10)));
 
         TypeReference<List<ThreadHistoryItem>> historyType = new TypeReference<>() {
         };
@@ -71,7 +88,8 @@ class ThreadHistoryItemJsonTest {
 
         assertEquals(history, restored);
 
-        CompactedHistoryItem compacted = assertInstanceOf(CompactedHistoryItem.class, restored.get(6));
+        assertTrue(restored.stream().anyMatch(HistoryCollabToolCallItem.class::isInstance));
+        CompactedHistoryItem compacted = assertInstanceOf(CompactedHistoryItem.class, restored.get(7));
         assertEquals("Compacted earlier thread context.", compacted.summaryText());
         assertEquals(CompactionStrategy.LOCAL_SUMMARY, compacted.strategy());
         assertEquals(2, compacted.replacementHistory().size());

@@ -54,6 +54,24 @@ public interface CodexRuntimeGateway {
         throw new UnsupportedOperationException("thread/archive is not implemented yet");
     }
 
+    default ThreadSummary renameThread(ThreadId threadId, String title) {
+        throw new UnsupportedOperationException("thread/name/set is not implemented yet");
+    }
+
+    default ThreadSummary updateThreadMetadata(ThreadId threadId,
+                                               String cwd,
+                                               String modelProvider,
+                                               String model) {
+        throw new UnsupportedOperationException("thread/metadata/update is not implemented yet");
+    }
+
+    default void unloadThread(ThreadId threadId) {
+    }
+
+    default int threadSubscriptionCount(ThreadId threadId) {
+        return 0;
+    }
+
     List<ConversationTurn> turns(ThreadId threadId);
 
     ConversationTurn turn(ThreadId threadId, TurnId turnId);

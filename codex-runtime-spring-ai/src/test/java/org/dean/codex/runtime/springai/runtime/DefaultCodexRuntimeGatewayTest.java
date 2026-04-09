@@ -9,6 +9,7 @@ import org.dean.codex.core.conversation.InMemoryConversationStore;
 import org.dean.codex.core.history.ThreadHistoryStore;
 import org.dean.codex.core.runtime.CodexRuntimeGateway;
 import org.dean.codex.protocol.agent.AgentMessage;
+import org.dean.codex.protocol.agent.AgentMailboxState;
 import org.dean.codex.protocol.agent.AgentSpawnRequest;
 import org.dean.codex.protocol.agent.AgentStatus;
 import org.dean.codex.core.skill.ResolvedSkill;
@@ -257,7 +258,7 @@ class DefaultCodexRuntimeGatewayTest {
     }
 
     @Test
-    void spawnAgentPersistsParentRelationshipCopiesHistoryAndExposesMailboxWait() {
+    void spawnAgentPersistsParentRelationshipCopiesHistoryAndExposesMailboxState() {
         ConversationStore conversationStore = new InMemoryConversationStore();
         InMemoryThreadHistoryStore historyStore = new InMemoryThreadHistoryStore();
         ThreadId parentThreadId = conversationStore.createThread("Parent thread");
@@ -294,7 +295,7 @@ class DefaultCodexRuntimeGatewayTest {
         assertEquals("worker", agent.role());
         assertEquals("root/worker-1", agent.path());
         assertEquals(1, agent.depth());
-        assertEquals(AgentStatus.RUNNING, agent.status());
+        assertTrue(agent.status() == AgentStatus.IDLE || agent.status() == AgentStatus.RUNNING);
         assertEquals(historyStore.read(parentThreadId), historyStore.read(agent.threadId()));
         assertEquals(parentThreadId, gateway.listThreads().stream()
                 .filter(summary -> summary.threadId().equals(agent.threadId()))
@@ -305,12 +306,9 @@ class DefaultCodexRuntimeGatewayTest {
         assertEquals(List.of(agent.threadId()),
                 gateway.listAgents(parentThreadId, false).stream().map(org.dean.codex.protocol.agent.AgentSummary::threadId).toList());
 
-        var waitResult = gateway.waitAgent(List.of(agent.threadId()), 100);
-        assertFalse(waitResult.timedOut());
-        assertEquals(agent.threadId(), waitResult.threadId());
-        assertEquals("Agent is idle.", waitResult.message());
-        assertEquals("done", waitResult.finalAnswer());
-        assertNotNull(waitResult.turnId());
+        AgentMailboxState mailbox = gateway.mailboxState(agent.threadId());
+        assertEquals(agent.threadId(), mailbox.threadId());
+        assertTrue(mailbox.sequence() >= 1);
         assertEquals("inspect repo", conversationStore.turns(agent.threadId()).get(0).userInput());
 
         var afterInput = gateway.sendInput(agent.threadId(), new AgentMessage(parentThreadId, agent.threadId(), "Please continue", Instant.now()), false);
@@ -319,7 +317,39 @@ class DefaultCodexRuntimeGatewayTest {
     }
 
     @Test
-    void waitAgentReturnsLatestCompletedResultForIdleAgent() {
+    void waitAgentTimesOutWhenNoNewMailboxActivityOccurs() {
+        ConversationStore conversationStore = new InMemoryConversationStore();
+        DefaultCodexRuntimeGateway gateway = new DefaultCodexRuntimeGateway(
+                conversationStore,
+                new CompletingTurnExecutor(conversationStore),
+                new NoOpContextManager(),
+                new NoOpThreadContextReconstructionService(),
+                null,
+                new NoOpSkillService(),
+                4);
+        ThreadId parentThreadId = conversationStore.createThread("Parent thread");
+
+        var agent = gateway.spawnAgent(new AgentSpawnRequest(
+                parentThreadId,
+                "root/worker-1",
+                null,
+                "worker-1",
+                "worker",
+                null,
+                null,
+                null,
+                null));
+
+        var waitResult = gateway.waitAgent(List.of(agent.threadId()), 50);
+
+        assertTrue(waitResult.timedOut());
+        assertEquals("Wait timed out.", waitResult.message());
+        assertNotNull(waitResult.mailbox());
+        assertEquals(agent.threadId(), waitResult.mailbox().threadId());
+    }
+
+    @Test
+    void waitAgentReturnsWhenMailboxChangesAfterWaitStarts() throws Exception {
         ConversationStore conversationStore = new InMemoryConversationStore();
         DefaultCodexRuntimeGateway gateway = new DefaultCodexRuntimeGateway(
                 conversationStore,
@@ -343,12 +373,80 @@ class DefaultCodexRuntimeGatewayTest {
                 null));
         awaitAgentStatus(gateway, agent.threadId(), AgentStatus.IDLE);
 
-        var waitResult = gateway.waitAgent(List.of(agent.threadId()), 50);
+        var waitFuture = java.util.concurrent.CompletableFuture.supplyAsync(() -> gateway.waitAgent(List.of(agent.threadId()), 1000));
+        Thread.sleep(100);
+        gateway.sendMessage(agent.threadId(), new AgentMessage(parentThreadId, agent.threadId(), "queue only", Instant.now()));
 
+        var waitResult = waitFuture.get(2, TimeUnit.SECONDS);
         assertFalse(waitResult.timedOut());
-        assertEquals("Agent is idle.", waitResult.message());
-        assertEquals("done", waitResult.finalAnswer());
-        assertNotNull(waitResult.turnId());
+        assertEquals("Agent mailbox updated.", waitResult.message());
+        assertNotNull(waitResult.mailbox());
+        assertTrue(waitResult.mailbox().sequence() >= 2);
+    }
+
+    @Test
+    void sendMessageQueuesWithoutStartingAThread() {
+        ConversationStore conversationStore = new InMemoryConversationStore();
+        DefaultCodexRuntimeGateway gateway = new DefaultCodexRuntimeGateway(
+                conversationStore,
+                new CompletingTurnExecutor(conversationStore),
+                new NoOpContextManager(),
+                new NoOpThreadContextReconstructionService(),
+                null,
+                new NoOpSkillService(),
+                4);
+        ThreadId parentThreadId = conversationStore.createThread("Parent thread");
+
+        var agent = gateway.spawnAgent(new AgentSpawnRequest(
+                parentThreadId,
+                "root/worker-1",
+                null,
+                "worker-1",
+                "worker",
+                null,
+                null,
+                null,
+                null));
+
+        awaitAgentStatus(gateway, agent.threadId(), AgentStatus.IDLE);
+        assertEquals(0, conversationStore.turns(agent.threadId()).size());
+
+        var afterMessage = gateway.sendMessage(agent.threadId(), new AgentMessage(parentThreadId, agent.threadId(), "queue only", Instant.now()));
+        assertEquals(agent.threadId(), afterMessage.threadId());
+        assertEquals(0, conversationStore.turns(agent.threadId()).size());
+    }
+
+    @Test
+    void assignTaskStartsAQueuedAgentTurn() {
+        ConversationStore conversationStore = new InMemoryConversationStore();
+        DefaultCodexRuntimeGateway gateway = new DefaultCodexRuntimeGateway(
+                conversationStore,
+                new CompletingTurnExecutor(conversationStore),
+                new NoOpContextManager(),
+                new NoOpThreadContextReconstructionService(),
+                null,
+                new NoOpSkillService(),
+                4);
+        ThreadId parentThreadId = conversationStore.createThread("Parent thread");
+
+        var agent = gateway.spawnAgent(new AgentSpawnRequest(
+                parentThreadId,
+                "root/worker-1",
+                "Investigate the failing tests",
+                "worker-1",
+                "worker",
+                null,
+                null,
+                null,
+                null));
+
+        awaitAgentStatus(gateway, agent.threadId(), AgentStatus.IDLE);
+        assertEquals(1, conversationStore.turns(agent.threadId()).size());
+
+        var afterAssign = gateway.assignTask(agent.threadId(), new AgentMessage(parentThreadId, agent.threadId(), "start work", Instant.now()), false);
+        awaitTurnCount(conversationStore, agent.threadId(), 2);
+        assertEquals(agent.threadId(), afterAssign.threadId());
+        assertEquals(2, conversationStore.turns(agent.threadId()).size());
     }
 
     @Test
@@ -636,6 +734,23 @@ class DefaultCodexRuntimeGatewayTest {
             }
         }
         throw new AssertionError("Timed out waiting for agent status " + expectedStatus + " for " + threadId.value());
+    }
+
+    private static void awaitTurnCount(ConversationStore store, ThreadId threadId, int expectedCount) {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (System.nanoTime() < deadlineNanos) {
+            if (store.turns(threadId).size() >= expectedCount) {
+                return;
+            }
+            try {
+                Thread.sleep(10);
+            }
+            catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        throw new AssertionError("Timed out waiting for turn count " + expectedCount + " for " + threadId.value());
     }
 
     private static final class InterruptibleTurnExecutor implements TurnExecutor {

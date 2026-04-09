@@ -13,6 +13,7 @@ import org.dean.codex.protocol.conversation.ConversationTurn;
 import org.dean.codex.protocol.conversation.ThreadId;
 import org.dean.codex.protocol.history.HistoryApprovalItem;
 import org.dean.codex.protocol.history.HistoryCompactionSummaryItem;
+import org.dean.codex.protocol.history.HistoryCollabToolCallItem;
 import org.dean.codex.protocol.history.HistoryMessageItem;
 import org.dean.codex.protocol.history.HistoryPlanItem;
 import org.dean.codex.protocol.history.HistoryRuntimeErrorItem;
@@ -22,6 +23,7 @@ import org.dean.codex.protocol.history.HistoryToolResultItem;
 import org.dean.codex.protocol.history.ThreadHistoryItem;
 import org.dean.codex.protocol.item.AgentMessageItem;
 import org.dean.codex.protocol.item.ApprovalItem;
+import org.dean.codex.protocol.item.CollabToolCallItem;
 import org.dean.codex.protocol.item.PlanItem;
 import org.dean.codex.protocol.item.RuntimeErrorItem;
 import org.dean.codex.protocol.item.SkillUseItem;
@@ -271,6 +273,14 @@ public class DefaultThreadContextReconstructionService implements ThreadContextR
         if (item instanceof HistoryToolResultItem historyToolResultItem) {
             return "toolResult: " + historyToolResultItem.toolName() + " " + historyToolResultItem.summary();
         }
+        if (item instanceof HistoryCollabToolCallItem historyCollabToolCallItem) {
+            return "collabToolCall: " + historyCollabToolCallItem.tool() + " "
+                    + historyCollabToolCallItem.status().jsonValue()
+                    + deliverySuffix(historyCollabToolCallItem.deliveryState()) + " "
+                    + collabTarget(historyCollabToolCallItem)
+                    + mailboxSuffix(historyCollabToolCallItem.mailboxes())
+                    + wakeupSuffix(historyCollabToolCallItem.wakeupCause());
+        }
         if (item instanceof HistoryApprovalItem historyApprovalItem) {
             return "approval: " + historyApprovalItem.state() + " " + historyApprovalItem.detail();
         }
@@ -306,6 +316,14 @@ public class DefaultThreadContextReconstructionService implements ThreadContextR
         }
         if (item instanceof ToolResultItem toolResultItem) {
             return "toolResult: " + toolResultItem.toolName() + " " + toolResultItem.summary();
+        }
+        if (item instanceof CollabToolCallItem collabToolCallItem) {
+            return "collabToolCall: " + collabToolCallItem.tool() + " "
+                    + collabToolCallItem.status().jsonValue()
+                    + deliverySuffix(collabToolCallItem.deliveryState()) + " "
+                    + collabTarget(collabToolCallItem)
+                    + mailboxSuffix(collabToolCallItem.mailboxes())
+                    + wakeupSuffix(collabToolCallItem.wakeupCause());
         }
         if (item instanceof ApprovalItem approvalItem) {
             return "approval: " + approvalItem.state() + " " + approvalItem.detail();
@@ -348,6 +366,50 @@ public class DefaultThreadContextReconstructionService implements ThreadContextR
 
     private String blankToPlaceholder(String value) {
         return value == null || value.isBlank() ? "(none)" : value;
+    }
+
+    private String collabTarget(CollabToolCallItem item) {
+        if (item.newThreadId() != null) {
+            return "newThread=" + item.newThreadId().value();
+        }
+        if (item.receiverThreadIds() != null && !item.receiverThreadIds().isEmpty()) {
+            return "targets=" + item.receiverThreadIds().stream().map(ThreadId::value).collect(Collectors.joining(","));
+        }
+        return item.prompt() == null ? "(none)" : item.prompt();
+    }
+
+    private String collabTarget(HistoryCollabToolCallItem item) {
+        if (item.newThreadId() != null) {
+            return "newThread=" + item.newThreadId().value();
+        }
+        if (item.receiverThreadIds() != null && !item.receiverThreadIds().isEmpty()) {
+            return "targets=" + item.receiverThreadIds().stream().map(ThreadId::value).collect(Collectors.joining(","));
+        }
+        return item.prompt() == null ? "(none)" : item.prompt();
+    }
+
+    private String mailboxSuffix(java.util.Map<String, org.dean.codex.protocol.agent.AgentMailboxState> mailboxes) {
+        if (mailboxes == null || mailboxes.isEmpty()) {
+            return "";
+        }
+        String summary = mailboxes.entrySet().stream()
+                .map(entry -> entry.getKey() + ":" + entry.getValue().pendingMessages() + "/" + entry.getValue().sequence())
+                .collect(Collectors.joining(","));
+        return " | mailbox[" + summary + "]";
+    }
+
+    private String deliverySuffix(org.dean.codex.protocol.item.CollabDeliveryState deliveryState) {
+        if (deliveryState == null) {
+            return "";
+        }
+        return " | delivery=" + deliveryState.jsonValue();
+    }
+
+    private String wakeupSuffix(String wakeupCause) {
+        if (wakeupCause == null || wakeupCause.isBlank()) {
+            return "";
+        }
+        return " | wake=" + wakeupCause;
     }
 
     private void requireThread(ThreadId threadId) {

@@ -325,6 +325,7 @@ class JsonRpcCodexAppServerSessionTest {
         PipedOutputStream serverToClient = new PipedOutputStream();
         PipedInputStream clientInput = new PipedInputStream(serverToClient);
         AtomicReference<Throwable> hostFailure = new AtomicReference<>();
+        BlockingQueue<AppServerNotification> notifications = new LinkedBlockingQueue<>();
 
         Thread hostThread = new Thread(() -> {
             try {
@@ -348,7 +349,8 @@ class JsonRpcCodexAppServerSessionTest {
                     hostThread.join(1_000);
                     clientInput.close();
                 },
-                Duration.ofSeconds(3))) {
+                Duration.ofSeconds(3));
+             AutoCloseable ignored = session.subscribe(notifications::add)) {
             session.initialize(new InitializeParams(
                     new AppServerClientInfo("transport-client", "Transport Client", "1.0.0"),
                     new AppServerCapabilities(false, List.of())));
@@ -357,6 +359,7 @@ class JsonRpcCodexAppServerSessionTest {
             ThreadId threadId = session.threadStart(new ThreadStartParams("Lifecycle thread")).thread().threadId();
             session.turnStart(new TurnStartParams(threadId, "Inspect repo"));
             session.turnStart(new TurnStartParams(threadId, "Run tests"));
+            awaitTurnCompletions(notifications, 2);
 
             var archived = session.threadArchive(new ThreadArchiveParams(threadId)).thread();
             assertTrue(archived.archived());
@@ -439,6 +442,24 @@ class JsonRpcCodexAppServerSessionTest {
             }
         }
         return observed;
+    }
+
+    private void awaitTurnCompletions(BlockingQueue<AppServerNotification> notifications, int expectedCompletions) throws InterruptedException {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        int completed = 0;
+        while (System.nanoTime() < deadlineNanos) {
+            AppServerNotification notification = notifications.poll(100, TimeUnit.MILLISECONDS);
+            if (notification == null) {
+                continue;
+            }
+            if (notification instanceof TurnCompletedNotification) {
+                completed++;
+                if (completed >= expectedCompletions) {
+                    return;
+                }
+            }
+        }
+        throw new IllegalStateException("Timed out waiting for " + expectedCompletions + " completed turns");
     }
 
     private CodexAppServer appServer() {

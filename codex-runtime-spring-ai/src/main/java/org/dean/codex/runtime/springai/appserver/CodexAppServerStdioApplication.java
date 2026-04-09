@@ -8,11 +8,16 @@ import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.ConfigurableApplicationContext;
 
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
+
 @SpringBootApplication(scanBasePackages = "org.dean.codex")
 public class CodexAppServerStdioApplication {
 
     public static void main(String[] args) {
         System.setProperty("org.springframework.boot.logging.LoggingSystem", "none");
+        PrintStream protocolStdout = System.out;
+        System.setOut(new PrintStream(System.err, true, StandardCharsets.UTF_8));
 
         SpringApplication application = new SpringApplication(CodexAppServerStdioApplication.class);
         application.setBannerMode(Banner.Mode.OFF);
@@ -22,7 +27,7 @@ public class CodexAppServerStdioApplication {
         ConfigurableApplicationContext context = application.run(args);
         try {
             CodexAppServer appServer = context.getBean(CodexAppServer.class);
-            new StdioJsonRpcAppServerLauncher(appServer).run(System.in, System.out);
+            new StdioJsonRpcAppServerLauncher(appServer).run(System.in, protocolStdout);
         }
         catch (Exception exception) {
             throw new IllegalStateException("Failed to run stdio app-server host.", exception);

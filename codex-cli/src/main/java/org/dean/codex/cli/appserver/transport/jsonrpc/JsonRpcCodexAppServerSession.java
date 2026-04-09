@@ -8,20 +8,45 @@ import org.dean.codex.protocol.appserver.AppServerNotification;
 import org.dean.codex.protocol.appserver.InitializeParams;
 import org.dean.codex.protocol.appserver.InitializeResponse;
 import org.dean.codex.protocol.appserver.InitializedNotification;
+import org.dean.codex.protocol.appserver.AgentCloseParams;
+import org.dean.codex.protocol.appserver.AgentCloseResponse;
+import org.dean.codex.protocol.appserver.AgentAssignTaskParams;
+import org.dean.codex.protocol.appserver.AgentAssignTaskResponse;
+import org.dean.codex.protocol.appserver.AgentListParams;
+import org.dean.codex.protocol.appserver.AgentListResponse;
+import org.dean.codex.protocol.appserver.AgentResumeParams;
+import org.dean.codex.protocol.appserver.AgentResumeResponse;
+import org.dean.codex.protocol.appserver.AgentSendInputParams;
+import org.dean.codex.protocol.appserver.AgentSendInputResponse;
+import org.dean.codex.protocol.appserver.AgentSendMessageParams;
+import org.dean.codex.protocol.appserver.AgentSendMessageResponse;
+import org.dean.codex.protocol.appserver.AgentSpawnParams;
+import org.dean.codex.protocol.appserver.AgentSpawnResponse;
+import org.dean.codex.protocol.appserver.AgentWaitParams;
+import org.dean.codex.protocol.appserver.AgentWaitResponse;
 import org.dean.codex.protocol.appserver.SkillsListParams;
 import org.dean.codex.protocol.appserver.SkillsListResponse;
 import org.dean.codex.protocol.appserver.ThreadArchiveParams;
 import org.dean.codex.protocol.appserver.ThreadArchiveResponse;
+import org.dean.codex.protocol.appserver.ThreadBackgroundTerminalsCleanParams;
+import org.dean.codex.protocol.appserver.ThreadBackgroundTerminalsCleanResponse;
 import org.dean.codex.protocol.appserver.ThreadCompactionStartedNotification;
 import org.dean.codex.protocol.appserver.ThreadCompactStartParams;
 import org.dean.codex.protocol.appserver.ThreadCompactStartResponse;
 import org.dean.codex.protocol.appserver.ThreadCompactedNotification;
+import org.dean.codex.protocol.appserver.ThreadClosedNotification;
 import org.dean.codex.protocol.appserver.ThreadForkParams;
 import org.dean.codex.protocol.appserver.ThreadForkResponse;
 import org.dean.codex.protocol.appserver.ThreadListParams;
 import org.dean.codex.protocol.appserver.ThreadListResponse;
 import org.dean.codex.protocol.appserver.ThreadLoadedListParams;
 import org.dean.codex.protocol.appserver.ThreadLoadedListResponse;
+import org.dean.codex.protocol.appserver.ThreadMetadataUpdateParams;
+import org.dean.codex.protocol.appserver.ThreadMetadataUpdateResponse;
+import org.dean.codex.protocol.appserver.ThreadMetadataUpdatedNotification;
+import org.dean.codex.protocol.appserver.ThreadNameSetParams;
+import org.dean.codex.protocol.appserver.ThreadNameSetResponse;
+import org.dean.codex.protocol.appserver.ThreadNameUpdatedNotification;
 import org.dean.codex.protocol.appserver.ThreadReadParams;
 import org.dean.codex.protocol.appserver.ThreadReadResponse;
 import org.dean.codex.protocol.appserver.ThreadRollbackParams;
@@ -30,9 +55,13 @@ import org.dean.codex.protocol.appserver.ThreadResumeParams;
 import org.dean.codex.protocol.appserver.ThreadResumeResponse;
 import org.dean.codex.protocol.appserver.ThreadStartParams;
 import org.dean.codex.protocol.appserver.ThreadStartResponse;
+import org.dean.codex.protocol.appserver.ThreadShellCommandParams;
+import org.dean.codex.protocol.appserver.ThreadShellCommandResponse;
 import org.dean.codex.protocol.appserver.ThreadStartedNotification;
 import org.dean.codex.protocol.appserver.ThreadUnarchiveParams;
 import org.dean.codex.protocol.appserver.ThreadUnarchiveResponse;
+import org.dean.codex.protocol.appserver.ThreadUnsubscribeParams;
+import org.dean.codex.protocol.appserver.ThreadUnsubscribeResponse;
 import org.dean.codex.protocol.appserver.TurnCompletedNotification;
 import org.dean.codex.protocol.appserver.TurnInterruptParams;
 import org.dean.codex.protocol.appserver.TurnInterruptResponse;
@@ -80,6 +109,9 @@ public class JsonRpcCodexAppServerSession implements CodexAppServerSession {
 
     private static final Map<String, Class<? extends AppServerNotification>> NOTIFICATION_TYPES = Map.of(
             "thread/started", ThreadStartedNotification.class,
+            "thread/closed", ThreadClosedNotification.class,
+            "thread/name/updated", ThreadNameUpdatedNotification.class,
+            "thread/metadata/updated", ThreadMetadataUpdatedNotification.class,
             "thread/compaction/started", ThreadCompactionStartedNotification.class,
             "thread/compacted", ThreadCompactedNotification.class,
             "turn/started", TurnStartedNotification.class,
@@ -174,6 +206,71 @@ public class JsonRpcCodexAppServerSession implements CodexAppServerSession {
     @Override
     public ThreadUnarchiveResponse threadUnarchive(ThreadUnarchiveParams params) {
         return request("thread/unarchive", params, ThreadUnarchiveResponse.class);
+    }
+
+    @Override
+    public ThreadUnsubscribeResponse threadUnsubscribe(ThreadUnsubscribeParams params) {
+        return request("thread/unsubscribe", params, ThreadUnsubscribeResponse.class);
+    }
+
+    @Override
+    public ThreadNameSetResponse threadNameSet(ThreadNameSetParams params) {
+        return request("thread/name/set", params, ThreadNameSetResponse.class);
+    }
+
+    @Override
+    public ThreadMetadataUpdateResponse threadMetadataUpdate(ThreadMetadataUpdateParams params) {
+        return request("thread/metadata/update", params, ThreadMetadataUpdateResponse.class);
+    }
+
+    @Override
+    public ThreadShellCommandResponse threadShellCommand(ThreadShellCommandParams params) {
+        return request("thread/shellCommand", params, ThreadShellCommandResponse.class);
+    }
+
+    @Override
+    public ThreadBackgroundTerminalsCleanResponse threadBackgroundTerminalsClean(ThreadBackgroundTerminalsCleanParams params) {
+        return request("thread/backgroundTerminals/clean", params, ThreadBackgroundTerminalsCleanResponse.class);
+    }
+
+    @Override
+    public AgentSpawnResponse agentSpawn(AgentSpawnParams params) {
+        return request("agent/spawn", params, AgentSpawnResponse.class);
+    }
+
+    @Override
+    public AgentSendInputResponse agentSendInput(AgentSendInputParams params) {
+        return request("agent/sendInput", params, AgentSendInputResponse.class);
+    }
+
+    @Override
+    public AgentSendMessageResponse agentSendMessage(AgentSendMessageParams params) {
+        return request("agent/sendMessage", params, AgentSendMessageResponse.class);
+    }
+
+    @Override
+    public AgentAssignTaskResponse agentAssignTask(AgentAssignTaskParams params) {
+        return request("agent/assignTask", params, AgentAssignTaskResponse.class);
+    }
+
+    @Override
+    public AgentWaitResponse agentWait(AgentWaitParams params) {
+        return request("agent/wait", params, AgentWaitResponse.class);
+    }
+
+    @Override
+    public AgentResumeResponse agentResume(AgentResumeParams params) {
+        return request("agent/resume", params, AgentResumeResponse.class);
+    }
+
+    @Override
+    public AgentCloseResponse agentClose(AgentCloseParams params) {
+        return request("agent/close", params, AgentCloseResponse.class);
+    }
+
+    @Override
+    public AgentListResponse agentList(AgentListParams params) {
+        return request("agent/list", params, AgentListResponse.class);
     }
 
     @Override

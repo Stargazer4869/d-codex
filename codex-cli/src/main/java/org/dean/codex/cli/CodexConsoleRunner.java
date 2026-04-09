@@ -32,19 +32,24 @@ import org.dean.codex.protocol.appserver.InitializeParams;
 import org.dean.codex.protocol.appserver.InitializedNotification;
 import org.dean.codex.protocol.appserver.SkillsListParams;
 import org.dean.codex.protocol.appserver.ThreadArchiveParams;
+import org.dean.codex.protocol.appserver.ThreadClosedNotification;
 import org.dean.codex.protocol.appserver.ThreadCompaction;
 import org.dean.codex.protocol.appserver.ThreadCompactStartParams;
 import org.dean.codex.protocol.appserver.ThreadCompactionStartedNotification;
 import org.dean.codex.protocol.appserver.ThreadCompactedNotification;
+import org.dean.codex.protocol.appserver.AgentMailboxUpdatedNotification;
 import org.dean.codex.protocol.appserver.ThreadForkParams;
 import org.dean.codex.protocol.appserver.ThreadListParams;
 import org.dean.codex.protocol.appserver.ThreadListResponse;
 import org.dean.codex.protocol.appserver.ThreadLoadedListParams;
 import org.dean.codex.protocol.appserver.ThreadReadParams;
 import org.dean.codex.protocol.appserver.ThreadReadResponse;
+import org.dean.codex.protocol.appserver.ThreadMetadataUpdatedNotification;
 import org.dean.codex.protocol.appserver.ThreadRollbackParams;
 import org.dean.codex.protocol.appserver.ThreadResumeParams;
 import org.dean.codex.protocol.appserver.ThreadStartParams;
+import org.dean.codex.protocol.appserver.ThreadNameUpdatedNotification;
+import org.dean.codex.protocol.appserver.ThreadStatusChangedNotification;
 import org.dean.codex.protocol.appserver.ThreadUnarchiveParams;
 import org.dean.codex.protocol.context.ThreadMemory;
 import org.dean.codex.protocol.appserver.TurnCompletedNotification;
@@ -66,6 +71,7 @@ import org.dean.codex.protocol.conversation.TurnId;
 import org.dean.codex.protocol.event.TurnEvent;
 import org.dean.codex.protocol.item.AgentMessageItem;
 import org.dean.codex.protocol.item.ApprovalItem;
+import org.dean.codex.protocol.item.CollabToolCallItem;
 import org.dean.codex.protocol.item.PlanItem;
 import org.dean.codex.protocol.item.RuntimeErrorItem;
 import org.dean.codex.protocol.item.ToolCallItem;
@@ -96,7 +102,9 @@ import java.util.Map;
 import java.util.Scanner;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 @Component
@@ -143,36 +151,15 @@ public class CodexConsoleRunner implements CommandLineRunner {
     }
 
     private void runInteractiveLoop(String initialPrompt) {
+        runInteractiveLoop(initialPrompt, false);
+    }
+
+    private void runInteractiveLoop(String initialPrompt, boolean preferFreshPromptOnStart) {
         ensureActiveThreadSelected();
-        try (Scanner scanner = new Scanner(System.in)) {
+        try (InteractiveConsoleLoop interactiveLoop = new InteractiveConsoleLoop()) {
             System.out.printf("Codex CLI. Active thread: %s%n", shortThreadId(activeThreadId));
             printHelp();
-            if (initialPrompt != null && !initialPrompt.isBlank()) {
-                waitForTurn("initial-prompt",
-                        () -> appServerSession.turnStart(new TurnStartParams(activeThreadId, initialPrompt)).turn());
-            }
-            while (true) {
-                System.out.print("> ");
-                if (!scanner.hasNextLine()) {
-                    System.out.println("\nInput closed. Shutting down.");
-                    return;
-                }
-
-                String input = scanner.nextLine().trim();
-                if (input.equalsIgnoreCase("exit") || input.equalsIgnoreCase("quit")) {
-                    System.out.println("Bye.");
-                    return;
-                }
-                if (input.isEmpty()) {
-                    continue;
-                }
-                if (handleConsoleCommand(input)) {
-                    continue;
-                }
-
-                waitForTurn("user-prompt",
-                        () -> appServerSession.turnStart(new TurnStartParams(activeThreadId, input)).turn());
-            }
+            interactiveLoop.run(initialPrompt, preferFreshPromptOnStart);
         }
     }
 
@@ -283,26 +270,6 @@ public class CodexConsoleRunner implements CommandLineRunner {
                 }
                 yield true;
             }
-            case "steer" -> {
-                ensureActiveThreadSelected();
-                String steerInput = invocation.arguments();
-                if (steerInput.isEmpty()) {
-                    System.out.println("Usage: /steer <message>");
-                }
-                else {
-                    ConversationTurn activeTurn = latestActiveTurn();
-                    if (activeTurn == null) {
-                        System.out.println("No active running turn in the current thread.");
-                    }
-                    else {
-                        TurnSteerResponse response = appServerSession.turnSteer(new TurnSteerParams(activeThreadId, activeTurn.turnId(), steerInput));
-                        System.out.println(response.accepted()
-                                ? "Steering accepted for turn " + shortTurnId(response.turnId()) + "."
-                                : "Steering request was not accepted.");
-                    }
-                }
-                yield true;
-            }
             case "approve" -> {
                 ensureActiveThreadSelected();
                 String approvalId = invocation.arguments();
@@ -398,7 +365,7 @@ public class CodexConsoleRunner implements CommandLineRunner {
         }
         appServerSession.threadResume(new ThreadResumeParams(target.threadId()));
         activeThreadId = target.threadId();
-        runInteractiveLoop(command.prompt());
+        runInteractiveLoop(command.prompt(), true);
     }
 
     private void launchForkCommand(ForkSessionCommand command) {
@@ -558,6 +525,7 @@ public class CodexConsoleRunner implements CommandLineRunner {
                         command.aliases().stream().map(alias -> "/" + alias).collect(Collectors.joining(", ")));
             }
         }
+        System.out.println("  Plain input steers an active regular turn; /interrupt remains explicit.");
         System.out.println("  exit, quit                           Leave the CLI");
     }
 
@@ -797,6 +765,16 @@ public class CodexConsoleRunner implements CommandLineRunner {
             }
             return;
         }
+        if (item instanceof CollabToolCallItem collabToolCallItem) {
+            String mailbox = formatCollabMailboxes(collabToolCallItem);
+            System.out.println("[collab:" + collabToolCallItem.status().jsonValue() + "] "
+                    + formatCollabToolName(collabToolCallItem.tool()) + " -> "
+                    + compactText(formatCollabTarget(collabToolCallItem))
+                    + formatDeliveryState(collabToolCallItem.deliveryState())
+                    + (mailbox.isBlank() ? "" : mailbox)
+                    + formatWakeupCause(collabToolCallItem.wakeupCause()));
+            return;
+        }
         if (item instanceof ApprovalItem approvalItem) {
             if (showToolActivity) {
                 System.out.println("[approval:" + approvalItem.state().name().toLowerCase(Locale.ROOT) + "] "
@@ -843,16 +821,31 @@ public class CodexConsoleRunner implements CommandLineRunner {
             if (approve) {
                 System.out.println("Approved command " + shortApprovalId(approval) + ".");
                 printApprovedCommandResult(approval.executionResult());
+                resumeApprovedTurn(approval);
             }
             else {
                 System.out.println("Rejected command " + shortApprovalId(approval) + ".");
             }
-            waitForTurn("approval-resume",
-                    () -> appServerSession.turnResume(new TurnResumeParams(activeThreadId, approval.turnId())).turn());
         }
         catch (IllegalArgumentException exception) {
             System.out.println(exception.getMessage());
         }
+    }
+
+    private void resumeApprovedTurn(CommandApprovalRequest approval) {
+        if (approval == null || approval.turnId() == null || activeThreadId == null) {
+            return;
+        }
+
+        RuntimeTurn resumedTurn = appServerSession.turnResume(new TurnResumeParams(activeThreadId, approval.turnId())).turn();
+        if (resumedTurn != null && resumedTurn.threadId() != null) {
+            activeThreadId = resumedTurn.threadId();
+        }
+        System.out.println("resumed turn " + shortTurnId(approval.turnId()) + ".");
+        logger.debug("approval resume requested thread={} turn={} status={}",
+                safeThreadId(activeThreadId),
+                safeTurnId(approval.turnId()),
+                resumedTurn == null ? "(none)" : resumedTurn.status());
     }
 
     private void printApprovedCommandResult(ShellCommandResult result) {
@@ -912,6 +905,48 @@ public class CodexConsoleRunner implements CommandLineRunner {
         return toolName.toLowerCase(Locale.ROOT).replace('_', ' ');
     }
 
+    private String formatCollabToolName(String toolName) {
+        if (toolName == null || toolName.isBlank()) {
+            return "collab";
+        }
+        return toolName.toLowerCase(Locale.ROOT).replace('_', ' ');
+    }
+
+    private String formatCollabTarget(CollabToolCallItem item) {
+        if (item.newThreadId() != null) {
+            return "newThread=" + item.newThreadId().value();
+        }
+        if (item.receiverThreadIds() != null && !item.receiverThreadIds().isEmpty()) {
+            return "targets=" + item.receiverThreadIds().stream().map(ThreadId::value).collect(Collectors.joining(","));
+        }
+        return item.prompt() == null ? "(none)" : item.prompt();
+    }
+
+    private String formatCollabMailboxes(CollabToolCallItem item) {
+        if (item.mailboxes() == null || item.mailboxes().isEmpty()) {
+            return "";
+        }
+        String summary = item.mailboxes().entrySet().stream()
+                .map(entry -> entry.getKey() + " pending=" + entry.getValue().pendingMessages()
+                        + " seq=" + entry.getValue().sequence())
+                .collect(Collectors.joining(", "));
+        return " | mailbox[" + summary + "]";
+    }
+
+    private String formatDeliveryState(org.dean.codex.protocol.item.CollabDeliveryState deliveryState) {
+        if (deliveryState == null) {
+            return "";
+        }
+        return " | delivery=" + deliveryState.jsonValue();
+    }
+
+    private String formatWakeupCause(String wakeupCause) {
+        if (wakeupCause == null || wakeupCause.isBlank()) {
+            return "";
+        }
+        return " | wake=" + wakeupCause;
+    }
+
     private String compactText(String value) {
         String sanitized = blankToPlaceholder(value).replaceAll("\\s+", " ").trim();
         if (sanitized.length() <= 180) {
@@ -936,7 +971,14 @@ public class CodexConsoleRunner implements CommandLineRunner {
     }
 
     private ConversationTurn latestActiveTurn() {
-        return appServerSession.threadRead(new ThreadReadParams(activeThreadId)).turns().stream()
+        return latestActiveTurn(activeThreadId);
+    }
+
+    private ConversationTurn latestActiveTurn(ThreadId threadId) {
+        if (threadId == null) {
+            return null;
+        }
+        return appServerSession.threadRead(new ThreadReadParams(threadId)).turns().stream()
                 .filter(turn -> turn.status() == org.dean.codex.protocol.conversation.TurnStatus.RUNNING
                         || turn.status() == org.dean.codex.protocol.conversation.TurnStatus.AWAITING_APPROVAL)
                 .reduce((first, second) -> second)
@@ -1292,199 +1334,305 @@ public class CodexConsoleRunner implements CommandLineRunner {
         return value == null || value.isBlank() ? null : value.trim();
     }
 
-    private void waitForTurn(String lifecycle, TurnStarter turnStarter) {
-        ThreadId threadId = activeThreadId;
-        long lifecycleStartedNanos = System.nanoTime();
-        logger.debug("turn-lifecycle start lifecycle={} thread={}",
-                lifecycle,
-                safeThreadId(threadId));
-        try (TurnNotificationSession session = new TurnNotificationSession(threadId, lifecycle)) {
-            logger.debug("turn-lifecycle request-start lifecycle={} thread={}",
-                    lifecycle,
-                    safeThreadId(threadId));
-            RuntimeTurn runtimeTurn = turnStarter.start();
-            logger.debug("turn-lifecycle request-accepted lifecycle={} thread={} turn={} status={}",
-                    lifecycle,
-                    safeThreadId(runtimeTurn.threadId()),
-                    safeTurnId(runtimeTurn.turnId()),
-                    runtimeTurn.status());
-            session.attach(runtimeTurn.turnId());
-            session.awaitCompletion();
-            logger.debug("turn-lifecycle notification-complete lifecycle={} thread={} turn={} elapsedMs={}",
-                    lifecycle,
-                    safeThreadId(runtimeTurn.threadId()),
-                    safeTurnId(runtimeTurn.turnId()),
-                    (System.nanoTime() - lifecycleStartedNanos) / 1_000_000L);
-            ConversationTurn completedTurn = appServerSession.threadRead(new ThreadReadParams(activeThreadId)).turns().stream()
-                    .filter(turn -> turn.turnId().equals(runtimeTurn.turnId()))
-                    .findFirst()
-                    .orElseThrow();
-            logger.debug("turn-lifecycle thread-read lifecycle={} thread={} turn={} status={} items={} events={}",
-                    lifecycle,
-                    safeThreadId(activeThreadId),
-                    safeTurnId(completedTurn.turnId()),
-                    completedTurn.status(),
-                    completedTurn.items().size(),
-                    completedTurn.events().size());
-            if (shouldPrintFinalAnswer(completedTurn)) {
-                System.out.println(completedTurn.finalAnswer());
-            }
-        }
-        catch (IllegalArgumentException exception) {
-            logger.debug("turn-lifecycle rejected lifecycle={} thread={} message={}",
-                    lifecycle,
-                    safeThreadId(threadId),
-                    exception.getMessage());
-            System.out.println(exception.getMessage());
-        }
-        catch (Exception exception) {
-            logger.debug("turn-lifecycle failed lifecycle={} thread={} elapsedMs={}",
-                    lifecycle,
-                    safeThreadId(threadId),
-                    (System.nanoTime() - lifecycleStartedNanos) / 1_000_000L,
-                    exception);
-            throw new IllegalStateException("Failed while waiting for turn notifications.", exception);
-        }
-    }
+    private final class InteractiveConsoleLoop implements AutoCloseable {
 
-    @FunctionalInterface
-    private interface TurnStarter {
-        RuntimeTurn start();
-    }
-
-    private final class TurnNotificationSession implements AutoCloseable {
-
-        private final CountDownLatch completionLatch = new CountDownLatch(1);
-        private final List<AppServerNotification> pendingNotifications = new ArrayList<>();
+        private final LinkedBlockingQueue<String> userInputs = new LinkedBlockingQueue<>();
+        private final LinkedBlockingQueue<AppServerNotification> notifications = new LinkedBlockingQueue<>();
         private final AutoCloseable subscription;
-        private final ThreadId threadId;
-        private final String lifecycle;
-        private TurnId targetTurnId;
+        private final Thread inputThread;
+        private final AtomicBoolean inputClosed = new AtomicBoolean(false);
+        private volatile boolean exitRequested;
+        private volatile boolean preferFreshPromptOnStart;
+        private ThreadId activeTurnThreadId;
+        private TurnId activeTurnId;
 
-        private TurnNotificationSession(ThreadId threadId, String lifecycle) {
-            this.threadId = threadId;
-            this.lifecycle = lifecycle == null ? "unknown" : lifecycle;
-            try {
-                this.subscription = appServerSession.subscribe(this::onNotification);
-                logger.debug("turn-notify subscribe lifecycle={} thread={}",
-                        this.lifecycle,
-                        safeThreadId(threadId));
-            }
-            catch (Exception exception) {
-                throw new IllegalStateException("Unable to subscribe to runtime notifications for thread "
-                        + shortThreadId(threadId), exception);
-            }
+        private InteractiveConsoleLoop() {
+            this.subscription = appServerSession.subscribe(notifications::offer);
+            this.inputThread = new Thread(this::readInputLoop, "codex-cli-console-input");
+            this.inputThread.setDaemon(true);
         }
 
-        private synchronized void attach(TurnId turnId) {
-            this.targetTurnId = turnId;
-            logger.debug("turn-notify attach lifecycle={} thread={} turn={} pendingBuffered={}",
-                    lifecycle,
-                    safeThreadId(threadId),
-                    safeTurnId(turnId),
-                    pendingNotifications.size());
-            for (AppServerNotification notification : pendingNotifications) {
-                if (matchesTurn(notification, turnId)) {
-                    process(notification);
-                }
+        private void run(String initialPrompt, boolean preferFreshPromptOnStart) {
+            this.preferFreshPromptOnStart = preferFreshPromptOnStart;
+            syncActiveTurnFromRuntime();
+            inputThread.start();
+            if (initialPrompt != null && !initialPrompt.isBlank()) {
+                submitPlainInput(initialPrompt.trim());
             }
-            pendingNotifications.clear();
-        }
-
-        private void awaitCompletion() {
+            printPrompt();
             try {
-                long waitStartedNanos = System.nanoTime();
-                while (true) {
-                    if (completionLatch.await(TURN_WAIT_LOG_INTERVAL_SECONDS, TimeUnit.SECONDS)) {
-                        logger.debug("turn-notify completed lifecycle={} thread={} turn={} waitMs={}",
-                                lifecycle,
-                                safeThreadId(threadId),
-                                safeTurnId(targetTurnId),
-                                (System.nanoTime() - waitStartedNanos) / 1_000_000L);
-                        return;
+                while (!exitRequested) {
+                    drainNotifications();
+                    if (exitRequested) {
+                        break;
                     }
-                    logger.debug("turn-notify waiting lifecycle={} thread={} turn={} waitMs={} pendingBuffered={}",
-                            lifecycle,
-                            safeThreadId(threadId),
-                            safeTurnId(targetTurnId),
-                            (System.nanoTime() - waitStartedNanos) / 1_000_000L,
-                            pendingNotificationCount());
+                    if (shouldExitWhenIdle()) {
+                        break;
+                    }
+                    String input = userInputs.poll(200, TimeUnit.MILLISECONDS);
+                    if (input == null) {
+                        continue;
+                    }
+                    handleUserInput(input);
+                    if (!exitRequested) {
+                        printPrompt();
+                    }
                 }
             }
             catch (InterruptedException exception) {
                 Thread.currentThread().interrupt();
-                throw new IllegalStateException("Interrupted while waiting for runtime notifications.", exception);
+                throw new IllegalStateException("Interrupted while waiting for CLI input.", exception);
+            }
+            finally {
+                drainNotifications();
+                if (!exitRequested && inputClosed.get() && !hasActiveTurn()) {
+                    System.out.println("\nInput closed. Shutting down.");
+                }
             }
         }
 
-        private synchronized void onNotification(AppServerNotification notification) {
-            if (targetTurnId == null) {
-                pendingNotifications.add(notification);
-                logger.debug("turn-notify buffered lifecycle={} thread={} method={} pendingBuffered={}",
-                        lifecycle,
-                        safeThreadId(threadId),
-                        notification == null ? "(null)" : notification.method(),
-                        pendingNotifications.size());
-                return;
+        private void readInputLoop() {
+            try (Scanner scanner = new Scanner(System.in)) {
+                while (!exitRequested && scanner.hasNextLine()) {
+                    userInputs.put(scanner.nextLine());
+                }
             }
-            if (!matchesTurn(notification, targetTurnId)) {
-                logger.debug("turn-notify ignored lifecycle={} thread={} targetTurn={} method={}",
-                        lifecycle,
-                        safeThreadId(threadId),
-                        safeTurnId(targetTurnId),
-                        notification == null ? "(null)" : notification.method());
-                return;
+            catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
             }
-            logger.debug("turn-notify matched lifecycle={} thread={} turn={} method={}",
-                    lifecycle,
-                    safeThreadId(threadId),
-                    safeTurnId(targetTurnId),
-                    notification == null ? "(null)" : notification.method());
-            process(notification);
+            finally {
+                inputClosed.set(true);
+            }
         }
 
-        private boolean matchesTurn(AppServerNotification notification, TurnId turnId) {
+        private void handleUserInput(String rawInput) {
+            String input = rawInput == null ? "" : rawInput.trim();
+            if (input.isEmpty()) {
+                return;
+            }
+            if (input.equalsIgnoreCase("exit") || input.equalsIgnoreCase("quit")) {
+                System.out.println("Bye.");
+                exitRequested = true;
+                return;
+            }
+            if (handleConsoleCommand(input)) {
+                if (!exitRequested) {
+                    syncActiveTurnFromRuntime();
+                }
+                return;
+            }
+            submitPlainInput(input);
+        }
+
+        private void submitPlainInput(String input) {
+            ensureSessionInitialized();
+            if (input.isBlank()) {
+                return;
+            }
+
+            if (hasActiveTurn()) {
+                if (preferFreshPromptOnStart) {
+                    logger.debug("interactive session preferring fresh turn after thread switch thread={}",
+                            safeThreadId(activeThreadId));
+                    preferFreshPromptOnStart = false;
+                    startInteractiveTurn(input);
+                    return;
+                }
+                TurnSteerResponse response = appServerSession.turnSteer(new TurnSteerParams(
+                        activeThreadId,
+                        activeTurnId,
+                        input));
+                if (response.accepted()) {
+                    logger.debug("interactive steer accepted thread={} turn={}",
+                            safeThreadId(activeThreadId),
+                            safeTurnId(activeTurnId));
+                    return;
+                }
+
+                drainNotifications();
+                syncActiveTurnFromRuntime();
+                if (!hasActiveTurn()) {
+                    logger.debug("interactive steer lost active turn; starting a new turn thread={}",
+                            safeThreadId(activeThreadId));
+                    startInteractiveTurn(input);
+                    return;
+                }
+
+                System.out.println("Active turn is not steerable yet. Use /interrupt or wait.");
+                return;
+            }
+
+            preferFreshPromptOnStart = false;
+            startInteractiveTurn(input);
+        }
+
+        private void startInteractiveTurn(String input) {
+            RuntimeTurn runtimeTurn = appServerSession.turnStart(new TurnStartParams(activeThreadId, input)).turn();
+            activeTurnThreadId = runtimeTurn.threadId();
+            activeTurnId = runtimeTurn.turnId();
+            logger.debug("interactive turn started thread={} turn={} status={}",
+                    safeThreadId(activeTurnThreadId),
+                    safeTurnId(activeTurnId),
+                    runtimeTurn.status());
+        }
+
+        private void drainNotifications() {
+            boolean sawNotification = false;
+            AppServerNotification notification;
+            while ((notification = notifications.poll()) != null) {
+                if (!sawNotification) {
+                    System.out.println();
+                    sawNotification = true;
+                }
+                handleNotification(notification);
+            }
+            if (sawNotification && !exitRequested) {
+                printPrompt();
+            }
+        }
+
+        private void handleNotification(AppServerNotification notification) {
+            if (notification == null) {
+                return;
+            }
             if (notification instanceof TurnStartedNotification started) {
-                return started.turn() != null && turnId.equals(started.turn().turnId());
+                if (started.turn() != null && started.turn().threadId().equals(activeThreadId)) {
+                    activeTurnThreadId = started.turn().threadId();
+                    activeTurnId = started.turn().turnId();
+                    preferFreshPromptOnStart = false;
+                    logger.debug("interactive turn notification started thread={} turn={}",
+                            safeThreadId(activeTurnThreadId),
+                            safeTurnId(activeTurnId));
+                }
+                return;
             }
-            if (notification instanceof TurnItemNotification item) {
-                return item.turn() != null && turnId.equals(item.turn().turnId());
+            if (notification instanceof TurnItemNotification itemNotification) {
+                if (itemNotification.turn() != null
+                        && itemNotification.turn().threadId() != null
+                        && itemNotification.turn().threadId().equals(activeThreadId)
+                        && itemNotification.item() != null) {
+                    printItem(itemNotification.item());
+                }
+                return;
             }
             if (notification instanceof TurnCompletedNotification completed) {
-                return completed.turn() != null && turnId.equals(completed.turn().turnId());
+                if (completed.turn() != null && completed.turn().threadId().equals(activeThreadId)) {
+                    activeTurnThreadId = completed.turn().threadId();
+                    activeTurnId = completed.turn().turnId();
+                    ConversationTurn completedTurn = appServerSession.threadRead(new ThreadReadParams(activeThreadId)).turns().stream()
+                            .filter(turn -> turn.turnId().equals(completed.turn().turnId()))
+                            .findFirst()
+                            .orElse(null);
+                    if (completedTurn != null && shouldPrintFinalAnswer(completedTurn)) {
+                        System.out.println(completedTurn.finalAnswer());
+                    }
+                }
+                syncActiveTurnFromRuntime();
+                if (!hasActiveTurn()) {
+                    activeTurnThreadId = null;
+                    activeTurnId = null;
+                }
+                return;
             }
-            return false;
+            if (notification instanceof ThreadClosedNotification closed) {
+                if (closed.thread() != null && closed.thread().threadId().equals(activeThreadId)) {
+                    activeThreadId = null;
+                    activeTurnThreadId = null;
+                    activeTurnId = null;
+                }
+                System.out.println("[thread] closed " + safeThreadId(closed.thread() == null ? null : closed.thread().threadId()));
+                return;
+            }
+            if (notification instanceof ThreadStatusChangedNotification updated) {
+                if (updated.thread() != null && updated.thread().threadId().equals(activeThreadId)) {
+                    System.out.println("[thread] status changed "
+                            + safeThreadId(updated.thread().threadId())
+                            + " -> "
+                            + formatThreadStatus(updated.thread().status()));
+                }
+                return;
+            }
+            if (notification instanceof ThreadNameUpdatedNotification updated) {
+                if (updated.thread() != null && updated.thread().threadId().equals(activeThreadId)) {
+                    System.out.println("[thread] renamed " + safeThreadId(updated.thread().threadId()) + " -> " + updated.thread().title());
+                }
+                return;
+            }
+            if (notification instanceof ThreadMetadataUpdatedNotification updated) {
+                if (updated.thread() != null && updated.thread().threadId().equals(activeThreadId)) {
+                    System.out.println("[thread] metadata updated " + safeThreadId(updated.thread().threadId()));
+                }
+                return;
+            }
+            if (notification instanceof AgentMailboxUpdatedNotification mailboxUpdated) {
+                if (mailboxUpdated.mailbox() != null && mailboxUpdated.mailbox().threadId() != null
+                        && mailboxUpdated.mailbox().threadId().equals(activeThreadId)) {
+                    logger.debug("mailbox updated thread={} pending={} sequence={} updatedAt={}",
+                            safeThreadId(mailboxUpdated.mailbox().threadId()),
+                            mailboxUpdated.mailbox().pendingMessages(),
+                            mailboxUpdated.mailbox().sequence(),
+                            formatTimestamp(mailboxUpdated.mailbox().updatedAt()));
+                }
+                return;
+            }
+            if (notification instanceof ThreadCompactionStartedNotification
+                    || notification instanceof ThreadCompactedNotification) {
+                printCompactionNotification(notification);
+            }
         }
 
-        private void process(AppServerNotification notification) {
-            if (notification instanceof TurnItemNotification itemNotification && itemNotification.item() != null) {
-                logger.debug("turn-notify item lifecycle={} thread={} turn={} itemType={}",
-                        lifecycle,
-                        safeThreadId(threadId),
-                        safeTurnId(targetTurnId),
-                        itemNotification.item().getClass().getSimpleName());
-                printItem(itemNotification.item());
+        private void syncActiveTurnFromRuntime() {
+            if (activeThreadId == null) {
+                activeTurnThreadId = null;
+                activeTurnId = null;
+                return;
             }
-            if (notification instanceof TurnCompletedNotification) {
-                logger.debug("turn-notify completion lifecycle={} thread={} turn={}",
-                        lifecycle,
-                        safeThreadId(threadId),
-                        safeTurnId(targetTurnId));
-                completionLatch.countDown();
+            ConversationTurn current = latestActiveTurn(activeThreadId);
+            if (current == null) {
+                activeTurnThreadId = null;
+                activeTurnId = null;
+                return;
+            }
+            activeTurnThreadId = activeThreadId;
+            activeTurnId = current.turnId();
+        }
+
+        private boolean hasActiveTurn() {
+            return activeTurnThreadId != null
+                    && activeTurnId != null
+                    && activeTurnThreadId.equals(activeThreadId);
+        }
+
+        private boolean shouldExitWhenIdle() {
+            return inputClosed.get()
+                    && userInputs.isEmpty()
+                    && notifications.isEmpty()
+                    && !hasActiveTurn();
+        }
+
+        private void printPrompt() {
+            if (!exitRequested) {
+                System.out.print("> ");
+                System.out.flush();
             }
         }
 
         @Override
-        public void close() throws Exception {
-            logger.debug("turn-notify unsubscribe lifecycle={} thread={} turn={}",
-                    lifecycle,
-                    safeThreadId(threadId),
-                    safeTurnId(targetTurnId));
-            subscription.close();
-        }
-
-        private synchronized int pendingNotificationCount() {
-            return pendingNotifications.size();
+        public void close() {
+            try {
+                subscription.close();
+            }
+            catch (Exception exception) {
+                logger.debug("interactive console subscription close failed", exception);
+            }
+            inputThread.interrupt();
+            try {
+                inputThread.join(1000);
+            }
+            catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+            }
+            drainNotifications();
         }
     }
 
@@ -1584,6 +1732,10 @@ public class CodexConsoleRunner implements CommandLineRunner {
 
     private String safeTurnId(TurnId turnId) {
         return turnId == null ? "(none)" : shortTurnId(turnId);
+    }
+
+    private String formatThreadStatus(org.dean.codex.protocol.conversation.ThreadStatus status) {
+        return status == null ? "unknown" : status.name().toLowerCase(Locale.ROOT);
     }
 
     private record LaunchMode(CliLaunchRequest request,
