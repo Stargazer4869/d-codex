@@ -10,6 +10,7 @@ import java.util.List;
 public record ResolvedPromptContext(ThreadId threadId,
                                     List<ConversationMessage> recentMessages,
                                     List<ReconstructedTurnActivity> recentActivities,
+                                    List<PromptExecSessionContext> activeExecSessions,
                                     String latestUserRequest,
                                     String scratchpad,
                                     int step,
@@ -20,6 +21,7 @@ public record ResolvedPromptContext(ThreadId threadId,
     public ResolvedPromptContext {
         recentMessages = recentMessages == null ? List.of() : List.copyOf(recentMessages);
         recentActivities = recentActivities == null ? List.of() : List.copyOf(recentActivities);
+        activeExecSessions = activeExecSessions == null ? List.of() : List.copyOf(activeExecSessions);
         latestUserRequest = latestUserRequest == null ? "" : latestUserRequest;
         scratchpad = scratchpad == null ? "" : scratchpad;
         selectedSkills = selectedSkills == null ? List.of() : List.copyOf(selectedSkills);

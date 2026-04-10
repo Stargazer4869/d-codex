@@ -5,6 +5,16 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.LongNode;
 import org.dean.codex.core.appserver.CodexAppServerSession;
 import org.dean.codex.protocol.appserver.AppServerNotification;
+import org.dean.codex.protocol.appserver.CommandExecParams;
+import org.dean.codex.protocol.appserver.CommandExecResizeParams;
+import org.dean.codex.protocol.appserver.CommandExecResizeResponse;
+import org.dean.codex.protocol.appserver.CommandExecResponse;
+import org.dean.codex.protocol.appserver.CommandExecTerminateParams;
+import org.dean.codex.protocol.appserver.CommandExecTerminateResponse;
+import org.dean.codex.protocol.appserver.CommandExecWriteParams;
+import org.dean.codex.protocol.appserver.CommandExecutionCompletedNotification;
+import org.dean.codex.protocol.appserver.CommandExecutionOutputDeltaNotification;
+import org.dean.codex.protocol.appserver.CommandExecutionTerminalInteractionNotification;
 import org.dean.codex.protocol.appserver.InitializeParams;
 import org.dean.codex.protocol.appserver.InitializeResponse;
 import org.dean.codex.protocol.appserver.InitializedNotification;
@@ -107,16 +117,19 @@ public class JsonRpcCodexAppServerSession implements CodexAppServerSession {
     private static final int METHOD_NOT_FOUND = -32601;
     private static final int SERVER_ERROR = -32000;
 
-    private static final Map<String, Class<? extends AppServerNotification>> NOTIFICATION_TYPES = Map.of(
-            "thread/started", ThreadStartedNotification.class,
-            "thread/closed", ThreadClosedNotification.class,
-            "thread/name/updated", ThreadNameUpdatedNotification.class,
-            "thread/metadata/updated", ThreadMetadataUpdatedNotification.class,
-            "thread/compaction/started", ThreadCompactionStartedNotification.class,
-            "thread/compacted", ThreadCompactedNotification.class,
-            "turn/started", TurnStartedNotification.class,
-            "turn/completed", TurnCompletedNotification.class,
-            "item/completed", TurnItemNotification.class);
+    private static final Map<String, Class<? extends AppServerNotification>> NOTIFICATION_TYPES = Map.ofEntries(
+            Map.entry("thread/started", ThreadStartedNotification.class),
+            Map.entry("thread/closed", ThreadClosedNotification.class),
+            Map.entry("thread/name/updated", ThreadNameUpdatedNotification.class),
+            Map.entry("thread/metadata/updated", ThreadMetadataUpdatedNotification.class),
+            Map.entry("thread/compaction/started", ThreadCompactionStartedNotification.class),
+            Map.entry("thread/compacted", ThreadCompactedNotification.class),
+            Map.entry("item/commandExecution/outputDelta", CommandExecutionOutputDeltaNotification.class),
+            Map.entry("item/commandExecution/terminalInteraction", CommandExecutionTerminalInteractionNotification.class),
+            Map.entry("item/commandExecution/completed", CommandExecutionCompletedNotification.class),
+            Map.entry("turn/started", TurnStartedNotification.class),
+            Map.entry("turn/completed", TurnCompletedNotification.class),
+            Map.entry("item/completed", TurnItemNotification.class));
 
     private final ObjectMapper objectMapper;
     private final BufferedReader reader;
@@ -226,6 +239,26 @@ public class JsonRpcCodexAppServerSession implements CodexAppServerSession {
     @Override
     public ThreadShellCommandResponse threadShellCommand(ThreadShellCommandParams params) {
         return request("thread/shellCommand", params, ThreadShellCommandResponse.class);
+    }
+
+    @Override
+    public CommandExecResponse commandExec(CommandExecParams params) {
+        return request("command/exec", params, CommandExecResponse.class);
+    }
+
+    @Override
+    public CommandExecResponse commandExecWrite(CommandExecWriteParams params) {
+        return request("command/exec/write", params, CommandExecResponse.class);
+    }
+
+    @Override
+    public CommandExecResizeResponse commandExecResize(CommandExecResizeParams params) {
+        return request("command/exec/resize", params, CommandExecResizeResponse.class);
+    }
+
+    @Override
+    public CommandExecTerminateResponse commandExecTerminate(CommandExecTerminateParams params) {
+        return request("command/exec/terminate", params, CommandExecTerminateResponse.class);
     }
 
     @Override

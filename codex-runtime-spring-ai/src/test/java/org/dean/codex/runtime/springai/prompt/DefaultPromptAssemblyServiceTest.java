@@ -49,22 +49,42 @@ class DefaultPromptAssemblyServiceTest {
                 1,
                 List.of(new ResolvedSkill(skillMetadata, "# reviewer\n\nReview carefully.")),
                 List.of(skillMetadata),
-                List.of("Stay focused on the README"));
+                List.of("Stay focused on the README"),
+                List.of(new PromptExecSessionContext(
+                        "exec-session-1",
+                        "npm test",
+                        "RUNNING",
+                        12345L,
+                        false,
+                        1,
+                        "first chunk",
+                        "")));
 
         assertTrue(prompt.instructions().baseText().contains("You are Codex"));
         assertEquals("json", prompt.outputContract().responseFormat());
         assertEquals(3, prompt.outputContract().maxActionsPerStep());
         assertEquals(threadId, prompt.context().threadId());
         assertTrue(prompt.toolContract().visibleToolNames().contains("READ_FILE"));
+        assertTrue(prompt.toolContract().visibleToolNames().contains("LIST_DIR"));
+        assertTrue(prompt.toolContract().visibleToolNames().contains("WEB_SEARCH"));
         assertTrue(prompt.toolContract().visibleToolNames().contains("spawn_agent"));
+        assertTrue(prompt.toolContract().visibleToolNames().contains("exec_command"));
         assertTrue(prompt.systemPrompt().contains("Workspace root: /tmp/workspace"));
         assertTrue(prompt.systemPrompt().contains("Available actions:"));
         assertTrue(prompt.systemPrompt().contains("Available skills:"));
         assertTrue(prompt.systemPrompt().contains("Do not return more than 3 actions in one step."));
+        assertTrue(prompt.systemPrompt().contains("Prefer LIST_DIR to discover directory structure before reading full files."));
+        assertTrue(prompt.systemPrompt().contains("Prefer WEB_SEARCH for external documentation, ecosystem facts, or recent references when local search is not enough."));
         assertTrue(prompt.outputContract().schemaText().contains("\"action\": \"send_message\""));
         assertTrue(prompt.outputContract().schemaText().contains("\"action\": \"assign_task\""));
+        assertTrue(prompt.outputContract().schemaText().contains("\"action\": \"LIST_DIR\""));
+        assertTrue(prompt.outputContract().schemaText().contains("\"action\": \"exec_command\""));
+        assertTrue(prompt.outputContract().schemaText().contains("\"action\": \"write_stdin\""));
         assertTrue(prompt.userPrompt().contains("USER: Replay canonical history"));
         assertTrue(prompt.userPrompt().contains("toolCall: READ_FILE README.md"));
+        assertTrue(prompt.userPrompt().contains("Active exec sessions:"));
+        assertTrue(prompt.userPrompt().contains("sessionId: exec-session-1"));
+        assertTrue(prompt.userPrompt().contains("command: npm test"));
         assertTrue(prompt.userPrompt().contains("Skill: reviewer"));
         assertTrue(prompt.userPrompt().contains("Stay focused on the README"));
         assertFalse(prompt.userPrompt().contains("Available skills:"));

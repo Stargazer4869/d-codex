@@ -6,6 +6,10 @@ import org.dean.codex.core.appserver.CodexAppServerSession;
 import org.dean.codex.core.conversation.ConversationStore;
 import org.dean.codex.core.conversation.InMemoryConversationStore;
 import org.dean.codex.protocol.appserver.AppServerNotification;
+import org.dean.codex.protocol.appserver.CommandExecutionCompletedNotification;
+import org.dean.codex.protocol.appserver.CommandExecutionEvent;
+import org.dean.codex.protocol.appserver.CommandExecutionOutputDeltaNotification;
+import org.dean.codex.protocol.appserver.CommandExecutionTerminalInteractionNotification;
 import org.dean.codex.protocol.appserver.AgentCloseParams;
 import org.dean.codex.protocol.appserver.AgentCloseResponse;
 import org.dean.codex.protocol.appserver.AgentAssignTaskParams;
@@ -317,6 +321,22 @@ class CodexConsoleRunnerTest {
     }
 
     @Test
+    void streamedCommandExecutionNotificationsAreRenderedClearly() throws Exception {
+        StubAppServer runtime = new StubAppServer(true, false, false, true, false, true, false);
+        CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());
+
+        CapturedRun captured = captureRun(() -> runner.run(), "inspect repo\n");
+
+        assertTrue(captured.stdout().contains("[command:stdout] one"));
+        assertTrue(captured.stdout().contains("[command:stdout] two"));
+        assertTrue(captured.stdout().contains("[command:resize] session=exec-ses size=120x40"));
+        assertTrue(captured.stdout().contains("[command:stdin] session=exec-ses chars=6"));
+        assertTrue(captured.stdout().contains("[command] completed session=exec-ses"));
+        assertTrue(captured.stdout().contains("status=COMPLETED"));
+        assertTrue(captured.stdout().contains("exitCode=0"));
+    }
+
+    @Test
     void historyCommandShowsReplayedCollaborationContextFromReconstruction() throws Exception {
         StubAppServer runtime = new StubAppServer();
         runtime.customThreadReadResponse = new ThreadReadResponse(
@@ -365,7 +385,7 @@ class CodexConsoleRunnerTest {
 
     @Test
     void plainInputWhileTurnActiveSteersInsteadOfStartingNewTurn() throws Exception {
-        StubAppServer runtime = new StubAppServer(true, false, true, true, true, false);
+        StubAppServer runtime = new StubAppServer(true, false, true, false, true, true, false);
         CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());
 
         CapturedRun captured = captureRun(() -> runner.run(), "inspect repo\nfollow up\n");
@@ -378,7 +398,7 @@ class CodexConsoleRunnerTest {
 
     @Test
     void staleSteerStateFallsBackToStartingANewTurn() throws Exception {
-        StubAppServer runtime = new StubAppServer(true, false, false, true, false, true);
+        StubAppServer runtime = new StubAppServer(true, false, false, false, true, false, true);
         CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());
 
         CapturedRun captured = captureRun(() -> runner.run(), "inspect repo\nfollow up\n");
@@ -390,7 +410,7 @@ class CodexConsoleRunnerTest {
 
     @Test
     void activeButUnsteerableTurnDoesNotSilentlyStartANewTurn() throws Exception {
-        StubAppServer runtime = new StubAppServer(true, false, false, true, false, false);
+        StubAppServer runtime = new StubAppServer(true, false, false, false, true, false, false);
         CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());
 
         CapturedRun captured = captureRun(() -> runner.run(), "inspect repo\nfollow up\n");
@@ -445,7 +465,7 @@ class CodexConsoleRunnerTest {
 
     @Test
     void approveCommandDoesNotBlockOnTurnCompletion() throws Exception {
-        StubAppServer runtime = new StubAppServer(true, false, false, false, true, false, true);
+        StubAppServer runtime = new StubAppServer(true, false, false, false, false, true, false, true);
         CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());
 
         assertTimeoutPreemptively(Duration.ofMillis(250), () -> {
@@ -458,7 +478,7 @@ class CodexConsoleRunnerTest {
 
     @Test
     void slashCommandsCanRunWhileTurnIsActiveAndInputStillSteers() throws Exception {
-        StubAppServer runtime = new StubAppServer(true, false, false, true, true, false);
+        StubAppServer runtime = new StubAppServer(true, false, false, false, true, true, false);
         CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());
 
         CapturedRun captured = captureRun(() -> runner.run(), "inspect repo\n/history\nfollow up\n");
@@ -732,6 +752,7 @@ class CodexConsoleRunnerTest {
         private final ThreadId subagentThreadId;
         private final boolean failResumeForExistingThreads;
         private final boolean emitToolActivity;
+        private final boolean emitCommandExecutionNotifications;
         private final boolean delayedTurnCompletion;
         private final boolean delayedTurnResumeCompletion;
         private final boolean steerAccepted;
@@ -748,32 +769,34 @@ class CodexConsoleRunnerTest {
         private ThreadForkParams lastForkParams;
 
         private StubAppServer() {
-            this(true, false, false, false, true, false);
+            this(true, false, false, false, false, true, false);
         }
 
         private StubAppServer(boolean preloadThreadsAsLoaded, boolean failResumeForExistingThreads) {
-            this(preloadThreadsAsLoaded, failResumeForExistingThreads, false, false, true, false);
+            this(preloadThreadsAsLoaded, failResumeForExistingThreads, false, false, false, true, false);
         }
 
         private StubAppServer(boolean preloadThreadsAsLoaded,
                               boolean failResumeForExistingThreads,
                               boolean emitToolActivity) {
-            this(preloadThreadsAsLoaded, failResumeForExistingThreads, emitToolActivity, false, true, false);
+            this(preloadThreadsAsLoaded, failResumeForExistingThreads, emitToolActivity, false, false, true, false);
         }
 
         private StubAppServer(boolean preloadThreadsAsLoaded,
                               boolean failResumeForExistingThreads,
                               boolean emitToolActivity,
+                              boolean emitCommandExecutionNotifications,
                               boolean delayedTurnCompletion,
                               boolean steerAccepted,
                               boolean completeOnSteerFailure) {
-            this(preloadThreadsAsLoaded, failResumeForExistingThreads, emitToolActivity, delayedTurnCompletion,
+            this(preloadThreadsAsLoaded, failResumeForExistingThreads, emitToolActivity, emitCommandExecutionNotifications, delayedTurnCompletion,
                     steerAccepted, completeOnSteerFailure, false);
         }
 
         private StubAppServer(boolean preloadThreadsAsLoaded,
                               boolean failResumeForExistingThreads,
                               boolean emitToolActivity,
+                              boolean emitCommandExecutionNotifications,
                               boolean delayedTurnCompletion,
                               boolean steerAccepted,
                               boolean completeOnSteerFailure,
@@ -782,6 +805,7 @@ class CodexConsoleRunnerTest {
             this.subagentThreadId = store.createThread("Worker thread");
             this.failResumeForExistingThreads = failResumeForExistingThreads;
             this.emitToolActivity = emitToolActivity;
+            this.emitCommandExecutionNotifications = emitCommandExecutionNotifications;
             this.delayedTurnCompletion = delayedTurnCompletion;
             this.delayedTurnResumeCompletion = delayedTurnResumeCompletion;
             this.steerAccepted = steerAccepted;
@@ -1322,6 +1346,42 @@ class CodexConsoleRunnerTest {
                     publish(threadId, new org.dean.codex.protocol.appserver.TurnItemNotification(
                             runningTurn,
                             new ToolResultItem(new ItemId("tool-result-1"), "RUN_COMMAND", "success=true exitCode=0", now.plusMillis(2))));
+                }
+                if (emitCommandExecutionNotifications) {
+                    CommandExecutionEvent commandExecution = new CommandExecutionEvent(
+                            "exec-session-1",
+                            threadId,
+                            "printf 'one\\n'; printf 'two\\n'",
+                            "/tmp/workspace",
+                            1234L,
+                            "RUNNING",
+                            now.plusMillis(1),
+                            null,
+                            null);
+                    publish(threadId, new CommandExecutionOutputDeltaNotification(commandExecution, "one\n", ""));
+                    publish(threadId, new CommandExecutionOutputDeltaNotification(commandExecution, "two\n", ""));
+                    publish(threadId, new CommandExecutionTerminalInteractionNotification(
+                            commandExecution,
+                            "resize",
+                            null,
+                            120,
+                            40));
+                    publish(threadId, new CommandExecutionTerminalInteractionNotification(
+                            commandExecution,
+                            "stdin",
+                            6,
+                            null,
+                            null));
+                    publish(threadId, new CommandExecutionCompletedNotification(new CommandExecutionEvent(
+                            "exec-session-1",
+                            threadId,
+                            "printf 'one\\n'; printf 'two\\n'",
+                            "/tmp/workspace",
+                            1234L,
+                            "COMPLETED",
+                            now.plusMillis(1),
+                            now.plusMillis(3),
+                            0)));
                 }
                 if (delayedTurnCompletion) {
                     Thread completionThread = new Thread(() -> completeTurnLater(threadId, turnId, now, input),

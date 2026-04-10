@@ -8,12 +8,19 @@ import org.dean.codex.core.context.ContextManager;
 import org.dean.codex.core.context.ThreadContextReconstructionService;
 import org.dean.codex.core.conversation.ConversationStore;
 import org.dean.codex.core.conversation.InMemoryConversationStore;
+import org.dean.codex.core.exec.ExecSessionId;
+import org.dean.codex.core.exec.ExecSessionManager;
+import org.dean.codex.core.exec.ExecSessionSummary;
 import org.dean.codex.core.runtime.CodexRuntimeGateway;
 import org.dean.codex.core.skill.ResolvedSkill;
 import org.dean.codex.core.skill.SkillService;
 import org.dean.codex.protocol.appserver.AppServerCapabilities;
 import org.dean.codex.protocol.appserver.AppServerClientInfo;
 import org.dean.codex.protocol.appserver.AppServerNotification;
+import org.dean.codex.protocol.appserver.CommandExecParams;
+import org.dean.codex.protocol.appserver.CommandExecResizeParams;
+import org.dean.codex.protocol.appserver.CommandExecTerminateParams;
+import org.dean.codex.protocol.appserver.CommandExecWriteParams;
 import org.dean.codex.protocol.appserver.AgentCloseParams;
 import org.dean.codex.protocol.appserver.AgentCloseResponse;
 import org.dean.codex.protocol.appserver.AgentAssignTaskParams;
@@ -30,6 +37,9 @@ import org.dean.codex.protocol.appserver.AgentSpawnResponse;
 import org.dean.codex.protocol.appserver.InitializeParams;
 import org.dean.codex.protocol.appserver.InitializedNotification;
 import org.dean.codex.protocol.appserver.SkillsListParams;
+import org.dean.codex.protocol.appserver.CommandExecutionCompletedNotification;
+import org.dean.codex.protocol.appserver.CommandExecutionOutputDeltaNotification;
+import org.dean.codex.protocol.appserver.CommandExecutionTerminalInteractionNotification;
 import org.dean.codex.protocol.appserver.ThreadArchiveParams;
 import org.dean.codex.protocol.appserver.ThreadCompaction;
 import org.dean.codex.protocol.appserver.ThreadCompactStartParams;
@@ -91,9 +101,15 @@ import org.dean.codex.runtime.springai.runtime.DefaultCodexRuntimeGateway;
 import org.dean.codex.runtime.springai.prompt.ThreadPromptSnapshot;
 import org.dean.codex.runtime.springai.prompt.ThreadPromptStateStore;
 import org.dean.codex.core.tool.local.ShellCommandTool;
+import org.dean.codex.tools.local.PatternCommandApprovalPolicy;
+import org.dean.codex.tools.local.ShellCommandToolImpl;
+import org.dean.codex.tools.local.exec.InMemoryExecSessionManager;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Path;
 import java.time.Instant;
+import java.time.Duration;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.Optional;
@@ -113,6 +129,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class InProcessCodexAppServerTest {
+
+    @TempDir
+    Path workspaceRoot;
 
     @Test
     void threadStartPublishesThreadStartedNotification() throws Exception {
@@ -667,8 +686,170 @@ class InProcessCodexAppServerTest {
     }
 
     @Test
+    void threadShellCommandPublishesCommandExecutionNotifications() throws Exception {
+        ExecSessionManager execSessionManager = new InMemoryExecSessionManager();
+        ShellCommandTool shellCommandTool = new ShellCommandToolImpl(
+                workspaceRoot,
+                new PatternCommandApprovalPolicy(PatternCommandApprovalPolicy.Mode.REVIEW_SENSITIVE),
+                Duration.ofSeconds(2),
+                execSessionManager);
+        CodexAppServer appServer = appServer(new InMemoryConversationStore(), new NoOpTurnExecutor(), shellCommandTool, execSessionManager);
+        BlockingQueue<AppServerNotification> notifications = new LinkedBlockingQueue<>();
+
+        try (CodexAppServerSession session = initializedSession(appServer);
+             AutoCloseable ignored = session.subscribe(notifications::add)) {
+            ThreadId threadId = session.threadStart(new ThreadStartParams("Streaming shell thread")).thread().threadId();
+
+            ThreadShellCommandResponse response = session.threadShellCommand(
+                    new ThreadShellCommandParams(threadId, "printf 'one\\n'; sleep 0.2; printf 'two\\n'"));
+
+            assertTrue(response.result().success());
+            assertTrue(response.result().stdout().contains("one"));
+            assertTrue(response.result().stdout().contains("two"));
+
+            List<AppServerNotification> observed = awaitNotifications(notifications, 12);
+            String stdout = observed.stream()
+                    .filter(CommandExecutionOutputDeltaNotification.class::isInstance)
+                    .map(CommandExecutionOutputDeltaNotification.class::cast)
+                    .filter(notification -> threadId.equals(notification.commandExecution().threadId()))
+                    .map(CommandExecutionOutputDeltaNotification::stdout)
+                    .reduce("", String::concat);
+            assertTrue(stdout.contains("one"));
+            assertTrue(stdout.contains("two"));
+            assertTrue(observed.stream().anyMatch(notification ->
+                    notification instanceof CommandExecutionCompletedNotification completed
+                            && threadId.equals(completed.commandExecution().threadId())
+                            && "COMPLETED".equals(completed.commandExecution().status())));
+        }
+    }
+
+    @Test
+    void commandExecRpcStartsWritesAndTerminatesExecSessions() throws Exception {
+        ExecSessionManager execSessionManager = new InMemoryExecSessionManager();
+        ShellCommandTool shellCommandTool = new ShellCommandToolImpl(
+                workspaceRoot,
+                new PatternCommandApprovalPolicy(PatternCommandApprovalPolicy.Mode.REVIEW_SENSITIVE),
+                Duration.ofSeconds(2),
+                execSessionManager);
+        CodexAppServer appServer = appServer(new InMemoryConversationStore(), new NoOpTurnExecutor(), shellCommandTool, execSessionManager);
+
+        try (CodexAppServerSession session = initializedSession(appServer)) {
+            ThreadId threadId = session.threadStart(new ThreadStartParams("Exec rpc thread")).thread().threadId();
+
+            var started = session.commandExec(new CommandExecParams(
+                    threadId,
+                    "printf 'one\\n'; sleep 1; printf 'two\\n'",
+                    workspaceRoot.toString(),
+                    250L,
+                    5_000L,
+                    Boolean.FALSE));
+
+            assertEquals(threadId, started.commandExecution().threadId());
+            assertEquals("RUNNING", started.commandExecution().status());
+            assertTrue(started.stdout().contains("one"));
+
+            var polled = session.commandExecWrite(new CommandExecWriteParams(
+                    threadId,
+                    started.commandExecution().sessionId(),
+                    "",
+                    1_500L));
+
+            assertTrue(polled.stdout().contains("two"));
+
+            var completed = session.commandExecWrite(new CommandExecWriteParams(
+                    threadId,
+                    started.commandExecution().sessionId(),
+                    "",
+                    500L));
+
+            assertEquals("COMPLETED", completed.commandExecution().status());
+
+            var resize = session.commandExecResize(new CommandExecResizeParams(
+                    threadId,
+                    started.commandExecution().sessionId(),
+                    120,
+                    40));
+            assertFalse(resize.applied());
+            assertEquals(started.commandExecution().sessionId(), resize.commandExecution().sessionId());
+
+            var terminate = session.commandExecTerminate(new CommandExecTerminateParams(
+                    threadId,
+                    started.commandExecution().sessionId()));
+            assertTrue(terminate.terminated());
+            assertEquals(started.commandExecution().sessionId(), terminate.commandExecution().sessionId());
+        }
+    }
+
+    @Test
+    void commandExecRpcSupportsPtyResizeAndTerminalInteractionNotifications() throws Exception {
+        ExecSessionManager execSessionManager = new InMemoryExecSessionManager();
+        ShellCommandTool shellCommandTool = new ShellCommandToolImpl(
+                workspaceRoot,
+                new PatternCommandApprovalPolicy(PatternCommandApprovalPolicy.Mode.REVIEW_SENSITIVE),
+                Duration.ofSeconds(5),
+                execSessionManager);
+        CodexAppServer appServer = appServer(new InMemoryConversationStore(), new NoOpTurnExecutor(), shellCommandTool, execSessionManager);
+        BlockingQueue<AppServerNotification> notifications = new LinkedBlockingQueue<>();
+
+        try (CodexAppServerSession session = initializedSession(appServer);
+             AutoCloseable ignored = session.subscribe(notifications::add)) {
+            ThreadId threadId = session.threadStart(new ThreadStartParams("Exec pty thread")).thread().threadId();
+
+            var started = session.commandExec(new CommandExecParams(
+                    threadId,
+                    "stty size; stty -echo; read value; stty echo; stty size; printf 'got:%s\\n' \"$value\"",
+                    workspaceRoot.toString(),
+                    250L,
+                    5_000L,
+                    Boolean.TRUE));
+
+            assertEquals(threadId, started.commandExecution().threadId());
+            assertEquals("RUNNING", started.commandExecution().status());
+
+            var resize = session.commandExecResize(new CommandExecResizeParams(
+                    threadId,
+                    started.commandExecution().sessionId(),
+                    120,
+                    40));
+            assertTrue(resize.applied());
+
+            var written = session.commandExecWrite(new CommandExecWriteParams(
+                    threadId,
+                    started.commandExecution().sessionId(),
+                    "hello\n",
+                    1_500L));
+            String firstPoll = normalizeOutput(started.stdout() + written.stdout());
+            assertTrue(firstPoll.contains("24 80"));
+            assertTrue(firstPoll.contains("40 120") || firstPoll.contains("got:hello"));
+
+            var completed = session.commandExecWrite(new CommandExecWriteParams(
+                    threadId,
+                    started.commandExecution().sessionId(),
+                    "",
+                    1_000L));
+            assertEquals("COMPLETED", completed.commandExecution().status());
+            String finalPoll = normalizeOutput(completed.stdout());
+            assertTrue(firstPoll.contains("got:hello") || finalPoll.contains("got:hello"));
+
+            List<AppServerNotification> observed = awaitNotifications(notifications, 16);
+            assertTrue(observed.stream().anyMatch(notification ->
+                    notification instanceof CommandExecutionTerminalInteractionNotification interaction
+                            && threadId.equals(interaction.commandExecution().threadId())
+                            && "resize".equals(interaction.kind())
+                            && Integer.valueOf(120).equals(interaction.columns())
+                            && Integer.valueOf(40).equals(interaction.rows())));
+            assertTrue(observed.stream().anyMatch(notification ->
+                    notification instanceof CommandExecutionTerminalInteractionNotification interaction
+                            && threadId.equals(interaction.commandExecution().threadId())
+                            && "stdin".equals(interaction.kind())
+                            && Integer.valueOf(6).equals(interaction.inputLength())));
+        }
+    }
+
+    @Test
     void threadBackgroundTerminalsCleanRemovesThreadOwnedBackgroundProcessState() throws Exception {
-        CodexAppServer appServer = appServer(new NoOpTurnExecutor());
+        ExecSessionManager execSessionManager = new InMemoryExecSessionManager();
+        CodexAppServer appServer = appServer(new InMemoryConversationStore(), new NoOpTurnExecutor(), new NoOpShellCommandTool(), execSessionManager);
 
         try (CodexAppServerSession session = initializedSession(appServer)) {
             ThreadId threadId = session.threadStart(new ThreadStartParams("Background thread")).thread().threadId();
@@ -679,6 +860,9 @@ class InProcessCodexAppServerTest {
             assertNotNull(launched.backgroundTerminal());
             assertNotNull(launched.backgroundTerminal().terminalId());
             assertTrue(launched.backgroundTerminal().pid() > 0);
+            ExecSessionSummary execSession = execSessionManager.session(new ExecSessionId(launched.backgroundTerminal().terminalId())).orElseThrow();
+            assertEquals(threadId, execSession.threadId());
+            assertTrue(execSession.running());
 
             ThreadReadResponse read = session.threadRead(new ThreadReadParams(threadId, false));
             assertEquals(1, read.backgroundTerminals().size());
@@ -692,6 +876,8 @@ class InProcessCodexAppServerTest {
                     session.threadBackgroundTerminalsClean(new ThreadBackgroundTerminalsCleanParams(threadId));
             assertEquals(threadId, cleaned.threadId());
             assertEquals(1, cleaned.cleanedCount());
+            ExecSessionSummary terminatedSession = awaitExecSessionNotRunning(execSessionManager, new ExecSessionId(launched.backgroundTerminal().terminalId()));
+            assertFalse(terminatedSession.running());
 
             ThreadReadResponse cleanedRead = session.threadRead(new ThreadReadParams(threadId, false));
             assertTrue(cleanedRead.backgroundTerminals().isEmpty());
@@ -787,7 +973,7 @@ class InProcessCodexAppServerTest {
                 new NoOpContextManager(),
                 new NoOpThreadContextReconstructionService(),
                 new NoOpSkillService());
-        CodexAppServer appServer = new InProcessCodexAppServer(runtimeGateway);
+        CodexAppServer appServer = new InProcessCodexAppServer(runtimeGateway, new NoOpShellCommandTool(), new InMemoryExecSessionManager());
 
         try (CodexAppServerSession session = initializedSession(appServer)) {
             ThreadId threadId = session.threadStart(new ThreadStartParams("Interrupt thread")).thread().threadId();
@@ -994,6 +1180,13 @@ class InProcessCodexAppServerTest {
     }
 
     private CodexAppServer appServer(ConversationStore store, TurnExecutor turnExecutor, ShellCommandTool shellCommandTool) {
+        return appServer(store, turnExecutor, shellCommandTool, new InMemoryExecSessionManager());
+    }
+
+    private CodexAppServer appServer(ConversationStore store,
+                                     TurnExecutor turnExecutor,
+                                     ShellCommandTool shellCommandTool,
+                                     ExecSessionManager execSessionManager) {
         SkillService skillService = new SkillService() {
             @Override
             public List<SkillMetadata> listSkills(boolean forceReload) {
@@ -1038,7 +1231,8 @@ class InProcessCodexAppServerTest {
                                 List.of("Project instructions:\nStay focused."),
                                 Instant.parse("2026-04-09T00:00:00Z")),
                         4),
-                shellCommandTool);
+                shellCommandTool,
+                execSessionManager);
     }
 
     private static final class StubThreadListRuntimeGateway implements CodexRuntimeGateway {
@@ -1336,6 +1530,22 @@ class InProcessCodexAppServerTest {
             Thread.sleep(10);
         }
         throw new AssertionError("Timed out waiting for turn count " + expectedCount + " for " + threadId.value());
+    }
+
+    private ExecSessionSummary awaitExecSessionNotRunning(ExecSessionManager execSessionManager, ExecSessionId sessionId) throws InterruptedException {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (System.nanoTime() < deadlineNanos) {
+            ExecSessionSummary summary = execSessionManager.session(sessionId).orElse(null);
+            if (summary != null && !summary.running()) {
+                return summary;
+            }
+            Thread.sleep(10);
+        }
+        throw new AssertionError("Timed out waiting for exec session to stop: " + sessionId.value());
+    }
+
+    private String normalizeOutput(String value) {
+        return value == null ? "" : value.replace("\r\n", "\n").replace('\r', '\n');
     }
 
     private static final class NoOpThreadContextReconstructionService implements ThreadContextReconstructionService {

@@ -30,6 +30,9 @@ import org.dean.codex.cli.launch.CliLaunchRequest;
 import org.dean.codex.protocol.appserver.AppServerCapabilities;
 import org.dean.codex.protocol.appserver.AppServerClientInfo;
 import org.dean.codex.protocol.appserver.AppServerNotification;
+import org.dean.codex.protocol.appserver.CommandExecutionCompletedNotification;
+import org.dean.codex.protocol.appserver.CommandExecutionOutputDeltaNotification;
+import org.dean.codex.protocol.appserver.CommandExecutionTerminalInteractionNotification;
 import org.dean.codex.protocol.appserver.InitializeParams;
 import org.dean.codex.protocol.appserver.InitializedNotification;
 import org.dean.codex.protocol.appserver.SkillsListParams;
@@ -1811,6 +1814,30 @@ public class CodexConsoleRunner implements CommandLineRunner {
             if (notification == null) {
                 return;
             }
+            if (notification instanceof CommandExecutionOutputDeltaNotification outputDelta) {
+                if (outputDelta.commandExecution() != null
+                        && outputDelta.commandExecution().threadId() != null
+                        && outputDelta.commandExecution().threadId().equals(activeThreadId)) {
+                    printCommandExecutionOutputDelta(outputDelta);
+                }
+                return;
+            }
+            if (notification instanceof CommandExecutionCompletedNotification commandCompleted) {
+                if (commandCompleted.commandExecution() != null
+                        && commandCompleted.commandExecution().threadId() != null
+                        && commandCompleted.commandExecution().threadId().equals(activeThreadId)) {
+                    printCommandExecutionCompleted(commandCompleted);
+                }
+                return;
+            }
+            if (notification instanceof CommandExecutionTerminalInteractionNotification terminalInteraction) {
+                if (terminalInteraction.commandExecution() != null
+                        && terminalInteraction.commandExecution().threadId() != null
+                        && terminalInteraction.commandExecution().threadId().equals(activeThreadId)) {
+                    printCommandExecutionTerminalInteraction(terminalInteraction);
+                }
+                return;
+            }
             if (notification instanceof TurnStartedNotification started) {
                 if (started.turn() != null && started.turn().threadId().equals(activeThreadId)) {
                     activeTurnThreadId = started.turn().threadId();
@@ -1894,6 +1921,67 @@ public class CodexConsoleRunner implements CommandLineRunner {
             if (notification instanceof ThreadCompactionStartedNotification
                     || notification instanceof ThreadCompactedNotification) {
                 printCompactionNotification(notification);
+            }
+        }
+
+        private void printCommandExecutionOutputDelta(CommandExecutionOutputDeltaNotification notification) {
+            if (notification == null) {
+                return;
+            }
+            printCommandStream("[command:stdout]", notification.stdout());
+            printCommandStream("[command:stderr]", notification.stderr());
+        }
+
+        private void printCommandExecutionCompleted(CommandExecutionCompletedNotification notification) {
+            if (notification == null || notification.commandExecution() == null) {
+                return;
+            }
+            String sessionId = notification.commandExecution().sessionId();
+            String shortSessionId = sessionId == null || sessionId.length() <= 8
+                    ? blankToPlaceholder(sessionId)
+                    : sessionId.substring(0, 8);
+            String status = blankToPlaceholder(notification.commandExecution().status());
+            Integer exitCode = notification.commandExecution().exitCode();
+            System.out.println("[command] completed session=" + shortSessionId
+                    + " status=" + status
+                    + (exitCode == null ? "" : " exitCode=" + exitCode));
+        }
+
+        private void printCommandExecutionTerminalInteraction(CommandExecutionTerminalInteractionNotification notification) {
+            if (notification == null || notification.commandExecution() == null) {
+                return;
+            }
+            String sessionId = notification.commandExecution().sessionId();
+            String shortSessionId = sessionId == null || sessionId.length() <= 8
+                    ? blankToPlaceholder(sessionId)
+                    : sessionId.substring(0, 8);
+            if ("stdin".equalsIgnoreCase(notification.kind())) {
+                System.out.println("[command:stdin] session=" + shortSessionId
+                        + " chars=" + (notification.inputLength() == null ? 0 : notification.inputLength()));
+                return;
+            }
+            if ("resize".equalsIgnoreCase(notification.kind())) {
+                System.out.println("[command:resize] session=" + shortSessionId
+                        + " size=" + (notification.columns() == null ? "(none)" : notification.columns())
+                        + "x"
+                        + (notification.rows() == null ? "(none)" : notification.rows()));
+                return;
+            }
+            System.out.println("[command:interaction] session=" + shortSessionId
+                    + " kind=" + blankToPlaceholder(notification.kind()));
+        }
+
+        private void printCommandStream(String prefix, String text) {
+            if (text == null || text.isEmpty()) {
+                return;
+            }
+            String normalized = text.replace("\r\n", "\n").replace('\r', '\n');
+            String[] lines = normalized.split("\n", -1);
+            for (String line : lines) {
+                if (line.isEmpty()) {
+                    continue;
+                }
+                System.out.println(prefix + " " + line);
             }
         }
 

@@ -8,11 +8,19 @@ import org.dean.codex.core.context.ContextManager;
 import org.dean.codex.core.context.ThreadContextReconstructionService;
 import org.dean.codex.core.conversation.ConversationStore;
 import org.dean.codex.core.conversation.InMemoryConversationStore;
+import org.dean.codex.core.exec.ExecSessionManager;
 import org.dean.codex.core.skill.ResolvedSkill;
 import org.dean.codex.core.skill.SkillService;
 import org.dean.codex.protocol.appserver.AppServerCapabilities;
 import org.dean.codex.protocol.appserver.AppServerClientInfo;
 import org.dean.codex.protocol.appserver.AppServerNotification;
+import org.dean.codex.protocol.appserver.CommandExecParams;
+import org.dean.codex.protocol.appserver.CommandExecResizeParams;
+import org.dean.codex.protocol.appserver.CommandExecTerminateParams;
+import org.dean.codex.protocol.appserver.CommandExecWriteParams;
+import org.dean.codex.protocol.appserver.CommandExecutionCompletedNotification;
+import org.dean.codex.protocol.appserver.CommandExecutionOutputDeltaNotification;
+import org.dean.codex.protocol.appserver.CommandExecutionTerminalInteractionNotification;
 import org.dean.codex.protocol.appserver.InitializeParams;
 import org.dean.codex.protocol.appserver.InitializeResponse;
 import org.dean.codex.protocol.appserver.InitializedNotification;
@@ -23,6 +31,7 @@ import org.dean.codex.protocol.appserver.ThreadLoadedListParams;
 import org.dean.codex.protocol.appserver.ThreadReadParams;
 import org.dean.codex.protocol.appserver.ThreadRollbackParams;
 import org.dean.codex.protocol.appserver.ThreadResumeParams;
+import org.dean.codex.protocol.appserver.ThreadShellCommandParams;
 import org.dean.codex.protocol.appserver.ThreadStartedNotification;
 import org.dean.codex.protocol.appserver.ThreadStartParams;
 import org.dean.codex.protocol.appserver.ThreadUnarchiveParams;
@@ -42,12 +51,17 @@ import org.dean.codex.runtime.springai.appserver.InProcessCodexAppServer;
 import org.dean.codex.runtime.springai.appserver.transport.jsonrpc.JsonRpcAppServerDispatcher;
 import org.dean.codex.runtime.springai.appserver.transport.jsonrpc.StdioJsonRpcAppServerHost;
 import org.dean.codex.runtime.springai.runtime.DefaultCodexRuntimeGateway;
+import org.dean.codex.tools.local.PatternCommandApprovalPolicy;
+import org.dean.codex.tools.local.ShellCommandToolImpl;
+import org.dean.codex.tools.local.exec.InMemoryExecSessionManager;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.PipedInputStream;
 import java.io.PipedOutputStream;
 import java.io.BufferedWriter;
 import java.io.OutputStreamWriter;
+import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -66,6 +80,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JsonRpcCodexAppServerSessionTest {
+
+    @TempDir
+    Path workspaceRoot;
 
     @Test
     void sessionHandlesInitializeThreadTurnAndNotificationsAcrossStdioTransport() throws Exception {
@@ -184,6 +201,248 @@ class JsonRpcCodexAppServerSessionTest {
 
             var loaded = session.threadLoadedList(new ThreadLoadedListParams());
             assertTrue(loaded.data().contains(threadId));
+        }
+
+        hostThread.join(1_000);
+        assertNull(hostFailure.get(), "Host failed: " + hostFailure.get());
+    }
+
+    @Test
+    void sessionReceivesCommandExecutionNotificationsAcrossStdioTransport() throws Exception {
+        ExecSessionManager execSessionManager = new InMemoryExecSessionManager();
+        CodexAppServer appServer = appServer(
+                new InMemoryConversationStore(),
+                new ShellCommandToolImpl(
+                        workspaceRoot,
+                        new PatternCommandApprovalPolicy(PatternCommandApprovalPolicy.Mode.REVIEW_SENSITIVE),
+                        Duration.ofSeconds(2),
+                        execSessionManager),
+                execSessionManager);
+        PipedOutputStream clientToServer = new PipedOutputStream();
+        PipedInputStream serverInput = new PipedInputStream(clientToServer);
+        PipedOutputStream serverToClient = new PipedOutputStream();
+        PipedInputStream clientInput = new PipedInputStream(serverToClient);
+        AtomicReference<Throwable> hostFailure = new AtomicReference<>();
+
+        Thread hostThread = new Thread(() -> {
+            try {
+                new StdioJsonRpcAppServerHost(
+                        new JsonRpcAppServerDispatcher(appServer),
+                        serverInput,
+                        serverToClient).run();
+            }
+            catch (Throwable throwable) {
+                hostFailure.set(throwable);
+            }
+        }, "test-jsonrpc-appserver-host-command-exec");
+        hostThread.setDaemon(true);
+        hostThread.start();
+
+        BlockingQueue<AppServerNotification> notifications = new LinkedBlockingQueue<>();
+        try (JsonRpcCodexAppServerSession session = new JsonRpcCodexAppServerSession(
+                clientInput,
+                clientToServer,
+                () -> {
+                    clientToServer.close();
+                    hostThread.join(1_000);
+                    clientInput.close();
+                },
+                Duration.ofSeconds(3));
+             AutoCloseable ignored = session.subscribe(notifications::add)) {
+            session.initialize(new InitializeParams(
+                    new AppServerClientInfo("transport-client", "Transport Client", "1.0.0"),
+                    new AppServerCapabilities(false, List.of())));
+            session.initialized(new InitializedNotification());
+            ThreadId threadId = session.threadStart(new ThreadStartParams("Exec thread")).thread().threadId();
+
+            var response = session.threadShellCommand(new ThreadShellCommandParams(
+                    threadId,
+                    "printf 'one\\n'; sleep 0.2; printf 'two\\n'"));
+
+            assertTrue(response.result().success());
+            List<AppServerNotification> observed = awaitNotifications(notifications);
+            assertTrue(observed.stream().anyMatch(notification ->
+                    notification instanceof CommandExecutionOutputDeltaNotification delta
+                            && threadId.equals(delta.commandExecution().threadId())));
+            assertTrue(observed.stream().anyMatch(notification ->
+                    notification instanceof CommandExecutionCompletedNotification completed
+                            && threadId.equals(completed.commandExecution().threadId())));
+        }
+
+        hostThread.join(1_000);
+        assertNull(hostFailure.get(), "Host failed: " + hostFailure.get());
+    }
+
+    @Test
+    void sessionSupportsCommandExecRpcsAcrossStdioTransport() throws Exception {
+        ExecSessionManager execSessionManager = new InMemoryExecSessionManager();
+        CodexAppServer appServer = appServer(
+                new InMemoryConversationStore(),
+                new ShellCommandToolImpl(
+                        workspaceRoot,
+                        new PatternCommandApprovalPolicy(PatternCommandApprovalPolicy.Mode.REVIEW_SENSITIVE),
+                        Duration.ofSeconds(2),
+                        execSessionManager),
+                execSessionManager);
+        PipedOutputStream clientToServer = new PipedOutputStream();
+        PipedInputStream serverInput = new PipedInputStream(clientToServer);
+        PipedOutputStream serverToClient = new PipedOutputStream();
+        PipedInputStream clientInput = new PipedInputStream(serverToClient);
+        AtomicReference<Throwable> hostFailure = new AtomicReference<>();
+
+        Thread hostThread = new Thread(() -> {
+            try {
+                new StdioJsonRpcAppServerHost(
+                        new JsonRpcAppServerDispatcher(appServer),
+                        serverInput,
+                        serverToClient).run();
+            }
+            catch (Throwable throwable) {
+                hostFailure.set(throwable);
+            }
+        }, "test-jsonrpc-appserver-host-command-exec-rpcs");
+        hostThread.setDaemon(true);
+        hostThread.start();
+
+        try (JsonRpcCodexAppServerSession session = new JsonRpcCodexAppServerSession(
+                clientInput,
+                clientToServer,
+                () -> {
+                    clientToServer.close();
+                    hostThread.join(1_000);
+                    clientInput.close();
+                },
+                Duration.ofSeconds(3))) {
+            session.initialize(new InitializeParams(
+                    new AppServerClientInfo("transport-client", "Transport Client", "1.0.0"),
+                    new AppServerCapabilities(false, List.of())));
+            session.initialized(new InitializedNotification());
+            ThreadId threadId = session.threadStart(new ThreadStartParams("Exec rpc thread")).thread().threadId();
+
+            var started = session.commandExec(new CommandExecParams(
+                    threadId,
+                    "printf 'one\\n'; sleep 1; printf 'two\\n'",
+                    workspaceRoot.toString(),
+                    50L,
+                    5_000L,
+                    Boolean.FALSE));
+
+            assertEquals(threadId, started.commandExecution().threadId());
+            assertEquals("RUNNING", started.commandExecution().status());
+            assertTrue(started.stdout().contains("one"));
+
+            var polled = session.commandExecWrite(new CommandExecWriteParams(
+                    threadId,
+                    started.commandExecution().sessionId(),
+                    "",
+                    1_500L));
+            assertTrue(polled.stdout().contains("two"));
+
+            var completed = session.commandExecWrite(new CommandExecWriteParams(
+                    threadId,
+                    started.commandExecution().sessionId(),
+                    "",
+                    500L));
+            assertEquals("COMPLETED", completed.commandExecution().status());
+
+            var resize = session.commandExecResize(new CommandExecResizeParams(
+                    threadId,
+                    started.commandExecution().sessionId(),
+                    120,
+                    40));
+            assertFalse(resize.applied());
+
+            var terminate = session.commandExecTerminate(new CommandExecTerminateParams(
+                    threadId,
+                    started.commandExecution().sessionId()));
+            assertTrue(terminate.terminated());
+        }
+
+        hostThread.join(1_000);
+        assertNull(hostFailure.get(), "Host failed: " + hostFailure.get());
+    }
+
+    @Test
+    void sessionReceivesTerminalInteractionNotificationsAcrossStdioTransport() throws Exception {
+        ExecSessionManager execSessionManager = new InMemoryExecSessionManager();
+        CodexAppServer appServer = appServer(
+                new InMemoryConversationStore(),
+                new ShellCommandToolImpl(
+                        workspaceRoot,
+                        new PatternCommandApprovalPolicy(PatternCommandApprovalPolicy.Mode.REVIEW_SENSITIVE),
+                        Duration.ofSeconds(5),
+                        execSessionManager),
+                execSessionManager);
+        PipedOutputStream clientToServer = new PipedOutputStream();
+        PipedInputStream serverInput = new PipedInputStream(clientToServer);
+        PipedOutputStream serverToClient = new PipedOutputStream();
+        PipedInputStream clientInput = new PipedInputStream(serverToClient);
+        AtomicReference<Throwable> hostFailure = new AtomicReference<>();
+
+        Thread hostThread = new Thread(() -> {
+            try {
+                new StdioJsonRpcAppServerHost(
+                        new JsonRpcAppServerDispatcher(appServer),
+                        serverInput,
+                        serverToClient).run();
+            }
+            catch (Throwable throwable) {
+                hostFailure.set(throwable);
+            }
+        }, "test-jsonrpc-appserver-host-command-exec-terminal-interaction");
+        hostThread.setDaemon(true);
+        hostThread.start();
+
+        BlockingQueue<AppServerNotification> notifications = new LinkedBlockingQueue<>();
+        try (JsonRpcCodexAppServerSession session = new JsonRpcCodexAppServerSession(
+                clientInput,
+                clientToServer,
+                () -> {
+                    clientToServer.close();
+                    hostThread.join(1_000);
+                    clientInput.close();
+                },
+                Duration.ofSeconds(3));
+             AutoCloseable ignored = session.subscribe(notifications::add)) {
+            session.initialize(new InitializeParams(
+                    new AppServerClientInfo("transport-client", "Transport Client", "1.0.0"),
+                    new AppServerCapabilities(false, List.of())));
+            session.initialized(new InitializedNotification());
+            ThreadId threadId = session.threadStart(new ThreadStartParams("Exec terminal interaction thread")).thread().threadId();
+
+            var started = session.commandExec(new CommandExecParams(
+                    threadId,
+                    "stty size; stty -echo; read value; stty echo; stty size; printf 'got:%s\\n' \"$value\"",
+                    workspaceRoot.toString(),
+                    250L,
+                    5_000L,
+                    Boolean.TRUE));
+
+            var resize = session.commandExecResize(new CommandExecResizeParams(
+                    threadId,
+                    started.commandExecution().sessionId(),
+                    120,
+                    40));
+            assertTrue(resize.applied());
+
+            session.commandExecWrite(new CommandExecWriteParams(
+                    threadId,
+                    started.commandExecution().sessionId(),
+                    "hello\n",
+                    1_500L));
+
+            List<AppServerNotification> observed = awaitNotifications(notifications);
+            assertTrue(observed.stream().anyMatch(notification ->
+                    notification instanceof CommandExecutionTerminalInteractionNotification interaction
+                            && threadId.equals(interaction.commandExecution().threadId())
+                            && "resize".equals(interaction.kind())
+                            && Integer.valueOf(120).equals(interaction.columns())
+                            && Integer.valueOf(40).equals(interaction.rows())));
+            assertTrue(observed.stream().anyMatch(notification ->
+                    notification instanceof CommandExecutionTerminalInteractionNotification interaction
+                            && threadId.equals(interaction.commandExecution().threadId())
+                            && "stdin".equals(interaction.kind())
+                            && Integer.valueOf(6).equals(interaction.inputLength())));
         }
 
         hostThread.join(1_000);
@@ -467,6 +726,12 @@ class JsonRpcCodexAppServerSessionTest {
     }
 
     private CodexAppServer appServer(ConversationStore store) {
+        return appServer(store, null, null);
+    }
+
+    private CodexAppServer appServer(ConversationStore store,
+                                     ShellCommandToolImpl shellCommandTool,
+                                     ExecSessionManager execSessionManager) {
         SkillService skillService = new SkillService() {
             @Override
             public List<SkillMetadata> listSkills(boolean forceReload) {
@@ -498,7 +763,9 @@ class JsonRpcCodexAppServerSessionTest {
                 Instant.now());
 
         return new InProcessCodexAppServer(
-                new DefaultCodexRuntimeGateway(store, new NoOpTurnExecutor(), contextManager, reconstructionService, skillService));
+                new DefaultCodexRuntimeGateway(store, new NoOpTurnExecutor(), contextManager, reconstructionService, skillService),
+                shellCommandTool,
+                execSessionManager);
     }
 
     private static final class NoOpTurnExecutor implements TurnExecutor {

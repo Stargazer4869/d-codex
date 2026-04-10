@@ -14,8 +14,11 @@ import org.dean.codex.core.skill.SkillService;
 import org.dean.codex.core.tool.local.FilePatchTool;
 import org.dean.codex.core.tool.local.FileReaderTool;
 import org.dean.codex.core.tool.local.FileSearchTool;
+import org.dean.codex.core.tool.local.ListDirTool;
+import org.dean.codex.core.tool.local.ExecCommandTool;
 import org.dean.codex.core.tool.local.FileWriterTool;
 import org.dean.codex.core.tool.local.ShellCommandTool;
+import org.dean.codex.core.tool.local.WebSearchTool;
 import org.dean.codex.protocol.planning.EditPlan;
 import org.dean.codex.protocol.planning.PlannedEdit;
 import org.dean.codex.protocol.planning.PlannedEditType;
@@ -48,10 +51,16 @@ import org.dean.codex.protocol.context.ReconstructedThreadContext;
 import org.dean.codex.protocol.context.ReconstructedTurnActivity;
 import org.dean.codex.protocol.skill.SkillMetadata;
 import org.dean.codex.protocol.tool.CommandApprovalDecision;
+import org.dean.codex.protocol.tool.ExecCommandResult;
 import org.dean.codex.runtime.springai.config.CodexProperties;
 import org.dean.codex.runtime.springai.prompt.DefaultPromptAssemblyService;
+import org.dean.codex.runtime.springai.prompt.DefaultToolObservationReducer;
+import org.dean.codex.runtime.springai.prompt.DefaultToolCapabilityRegistry;
+import org.dean.codex.runtime.springai.prompt.PromptExecSessionContext;
 import org.dean.codex.runtime.springai.prompt.PromptAssemblyService;
 import org.dean.codex.runtime.springai.prompt.ResolvedPrompt;
+import org.dean.codex.runtime.springai.prompt.ToolObservationReducer;
+import org.dean.codex.runtime.springai.prompt.ToolCapabilityRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -81,29 +90,38 @@ public class SpringAiCodexAgent implements CodexAgent {
     private final ChatClient chatClient;
     private final FileReaderTool fileReaderTool;
     private final FileSearchTool fileSearchTool;
+    private final ListDirTool listDirTool;
+    private final WebSearchTool webSearchTool;
     private final FilePatchTool filePatchTool;
     private final FileWriterTool fileWriterTool;
     private final ShellCommandTool shellCommandTool;
+    private final ExecCommandTool execCommandTool;
     private final CommandApprovalService commandApprovalService;
     private final Supplier<AgentControl> agentControlSupplier;
     private final ThreadContextReconstructionService threadContextReconstructionService;
     private final ContextManager contextManager;
     private final SkillService skillService;
     private final PromptAssemblyService promptAssemblyService;
+    private final ToolCapabilityRegistry toolCapabilityRegistry;
+    private final ToolObservationReducer toolObservationReducer;
     private final ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
     private final Path workspaceRoot;
     private final int maxSteps;
     private final int maxActionsPerStep;
     private final int autoCompactTokenLimit;
     private final int contextWindow;
+    private List<PromptExecSessionContext> activeExecSessionsForPrompt = List.of();
 
     @Autowired
     public SpringAiCodexAgent(ChatClient.Builder chatClientBuilder,
                               FileReaderTool fileReaderTool,
                               FileSearchTool fileSearchTool,
+                              ListDirTool listDirTool,
+                              WebSearchTool webSearchTool,
                               FilePatchTool filePatchTool,
                               FileWriterTool fileWriterTool,
                               ShellCommandTool shellCommandTool,
+                              ObjectProvider<ExecCommandTool> execCommandToolProvider,
                               CommandApprovalService commandApprovalService,
                               ObjectProvider<AgentControl> agentControlProvider,
                               ThreadContextReconstructionService threadContextReconstructionService,
@@ -115,9 +133,12 @@ public class SpringAiCodexAgent implements CodexAgent {
         this(chatClientBuilder,
                 fileReaderTool,
                 fileSearchTool,
+                listDirTool,
+                webSearchTool,
                 filePatchTool,
                 fileWriterTool,
                 shellCommandTool,
+                execCommandToolProvider == null ? null : execCommandToolProvider.getIfAvailable(),
                 commandApprovalService,
                 agentControlProvider == null ? () -> null : agentControlProvider::getIfAvailable,
                 threadContextReconstructionService,
@@ -131,6 +152,8 @@ public class SpringAiCodexAgent implements CodexAgent {
     SpringAiCodexAgent(ChatClient.Builder chatClientBuilder,
                        FileReaderTool fileReaderTool,
                        FileSearchTool fileSearchTool,
+                       ListDirTool listDirTool,
+                       WebSearchTool webSearchTool,
                        FilePatchTool filePatchTool,
                        FileWriterTool fileWriterTool,
                        ShellCommandTool shellCommandTool,
@@ -144,9 +167,46 @@ public class SpringAiCodexAgent implements CodexAgent {
         this(chatClientBuilder,
                 fileReaderTool,
                 fileSearchTool,
+                listDirTool,
+                webSearchTool,
                 filePatchTool,
                 fileWriterTool,
                 shellCommandTool,
+                null,
+                commandApprovalService,
+                agentControl,
+                threadContextReconstructionService,
+                contextManager,
+                skillService,
+                workspaceRoot,
+                codexProperties);
+    }
+
+    SpringAiCodexAgent(ChatClient.Builder chatClientBuilder,
+                       FileReaderTool fileReaderTool,
+                       FileSearchTool fileSearchTool,
+                       ListDirTool listDirTool,
+                       WebSearchTool webSearchTool,
+                       FilePatchTool filePatchTool,
+                       FileWriterTool fileWriterTool,
+                       ShellCommandTool shellCommandTool,
+                       ExecCommandTool execCommandTool,
+                       CommandApprovalService commandApprovalService,
+                       AgentControl agentControl,
+                       ThreadContextReconstructionService threadContextReconstructionService,
+                       ContextManager contextManager,
+                       SkillService skillService,
+                       Path workspaceRoot,
+                       CodexProperties codexProperties) {
+        this(chatClientBuilder,
+                fileReaderTool,
+                fileSearchTool,
+                listDirTool,
+                webSearchTool,
+                filePatchTool,
+                fileWriterTool,
+                shellCommandTool,
+                execCommandTool,
                 commandApprovalService,
                 () -> agentControl,
                 threadContextReconstructionService,
@@ -160,9 +220,12 @@ public class SpringAiCodexAgent implements CodexAgent {
     private SpringAiCodexAgent(ChatClient.Builder chatClientBuilder,
                                FileReaderTool fileReaderTool,
                                FileSearchTool fileSearchTool,
+                               ListDirTool listDirTool,
+                               WebSearchTool webSearchTool,
                                FilePatchTool filePatchTool,
                                FileWriterTool fileWriterTool,
                                ShellCommandTool shellCommandTool,
+                               ExecCommandTool execCommandTool,
                                CommandApprovalService commandApprovalService,
                                Supplier<AgentControl> agentControlSupplier,
                                ThreadContextReconstructionService threadContextReconstructionService,
@@ -176,15 +239,20 @@ public class SpringAiCodexAgent implements CodexAgent {
                 .build();
         this.fileReaderTool = fileReaderTool;
         this.fileSearchTool = fileSearchTool;
+        this.listDirTool = listDirTool;
+        this.webSearchTool = webSearchTool;
         this.filePatchTool = filePatchTool;
         this.fileWriterTool = fileWriterTool;
         this.shellCommandTool = shellCommandTool;
+        this.execCommandTool = execCommandTool;
         this.commandApprovalService = commandApprovalService;
         this.agentControlSupplier = agentControlSupplier == null ? () -> null : agentControlSupplier;
         this.threadContextReconstructionService = threadContextReconstructionService;
         this.contextManager = contextManager;
         this.skillService = skillService;
         this.workspaceRoot = workspaceRoot;
+        this.toolCapabilityRegistry = new DefaultToolCapabilityRegistry();
+        this.toolObservationReducer = new DefaultToolObservationReducer();
         CodexProperties.Agent agent = codexProperties.getAgent();
         this.maxSteps = Math.max(1, agent.getMaxSteps());
         this.maxActionsPerStep = Math.max(1, agent.getMaxActionsPerStep());
@@ -215,6 +283,7 @@ public class SpringAiCodexAgent implements CodexAgent {
         String safeInput = input == null ? "" : input.trim();
         TurnControl safeTurnControl = turnControl == null ? new TurnControl() { } : turnControl;
         try {
+            activeExecSessionsForPrompt = List.of();
             List<ResolvedSkill> selectedSkills = selectedSkillsForInput(safeInput);
             List<SkillMetadata> availableSkills = skillService.listSkills(false);
             logger.debug("planner turn start thread={} turn={} inputChars={} selectedSkills={} availableSkills={}",
@@ -253,6 +322,9 @@ public class SpringAiCodexAgent implements CodexAgent {
                     List.of(errorItem),
                     "The Codex agent hit an error: " + safeMessage(exception.getMessage()));
         }
+        finally {
+            activeExecSessionsForPrompt = List.of();
+        }
     }
 
     private ExecutionOutcome runPlanningLoop(ThreadId threadId,
@@ -267,12 +339,15 @@ public class SpringAiCodexAgent implements CodexAgent {
         StringBuilder scratchpad = new StringBuilder();
         String lastObservation = "(none)";
         boolean skipNextPreSamplingAutoCompaction = false;
+        Map<String, ActiveExecSessionState> activeExecSessions = new LinkedHashMap<>();
 
         for (int step = 1; step <= maxSteps; step++) {
             if (turnControl.interruptionRequested()) {
                 return interruptedOutcome(items, itemConsumer);
             }
             List<String> steeringInputs = turnControl.drainSteeringInputs();
+            List<PromptExecSessionContext> execSessionContexts = execSessionContexts(activeExecSessions);
+            activeExecSessionsForPrompt = execSessionContexts;
             if (!steeringInputs.isEmpty()) {
                 steeringInputs.forEach(steeringInput ->
                         emitItem(items, itemConsumer, new UserMessageItem(new ItemId(UUID.randomUUID().toString()), steeringInput, Instant.now())));
@@ -288,7 +363,8 @@ public class SpringAiCodexAgent implements CodexAgent {
                         step,
                         selectedSkills,
                         availableSkills,
-                        steeringInputs);
+                        steeringInputs,
+                        execSessionContexts);
             }
             logger.debug("planner step start thread={} turn={} step={} scratchpadChars={} steeringInputs={} selectedSkills={} availableSkills={}",
                     threadId.value(),
@@ -329,6 +405,7 @@ public class SpringAiCodexAgent implements CodexAgent {
             if (decision.validationError() == null) {
                 batchOutcome = executeActions(threadId, turnId, decision.actions(), items, itemConsumer);
                 observation = batchOutcome.observation();
+                updateActiveExecSessions(activeExecSessions, batchOutcome.execSessionObservations());
             }
             else {
                 observation = createErrorObservation(decision.validationError());
@@ -365,7 +442,8 @@ public class SpringAiCodexAgent implements CodexAgent {
                     step + 1,
                     selectedSkills,
                     availableSkills,
-                    List.of());
+                    List.of(),
+                    execSessionContexts(activeExecSessions));
             if (compacted) {
                 skipNextPreSamplingAutoCompaction = true;
                 continue;
@@ -407,7 +485,8 @@ public class SpringAiCodexAgent implements CodexAgent {
                 step,
                 selectedSkills,
                 availableSkills,
-                steeringInputs);
+                steeringInputs,
+                activeExecSessionsForPrompt);
         String systemPrompt = resolvedPrompt.systemPrompt();
         String userPrompt = resolvedPrompt.userPrompt();
         logger.debug("planner request start thread={} turn={} step={} systemChars={} userChars={} recentMessages={} recentTurns={} recentActivities={} selectedSkills={} availableSkills={} steeringInputs={}",
@@ -454,8 +533,9 @@ public class SpringAiCodexAgent implements CodexAgent {
                                                    int step,
                                                    List<ResolvedSkill> selectedSkills,
                                                    List<SkillMetadata> availableSkills,
-                                                   List<String> steeringInputs) {
-        return maybeAutoCompact(threadId, input, scratchpad, step, selectedSkills, availableSkills, steeringInputs,
+                                                   List<String> steeringInputs,
+                                                   List<PromptExecSessionContext> activeExecSessions) {
+        return maybeAutoCompact(threadId, input, scratchpad, step, selectedSkills, availableSkills, steeringInputs, activeExecSessions,
                 "before sampling");
     }
 
@@ -465,8 +545,9 @@ public class SpringAiCodexAgent implements CodexAgent {
                                                  int step,
                                                  List<ResolvedSkill> selectedSkills,
                                                  List<SkillMetadata> availableSkills,
-                                                 List<String> steeringInputs) {
-        return maybeAutoCompact(threadId, input, scratchpad, step, selectedSkills, availableSkills, steeringInputs,
+                                                 List<String> steeringInputs,
+                                                 List<PromptExecSessionContext> activeExecSessions) {
+        return maybeAutoCompact(threadId, input, scratchpad, step, selectedSkills, availableSkills, steeringInputs, activeExecSessions,
                 "after actions");
     }
 
@@ -477,6 +558,7 @@ public class SpringAiCodexAgent implements CodexAgent {
                                      List<ResolvedSkill> selectedSkills,
                                      List<SkillMetadata> availableSkills,
                                      List<String> steeringInputs,
+                                     List<PromptExecSessionContext> activeExecSessions,
                                      String phase) {
         int limit = effectiveAutoCompactTokenLimit();
         if (limit <= 0) {
@@ -490,7 +572,8 @@ public class SpringAiCodexAgent implements CodexAgent {
                 step,
                 selectedSkills,
                 availableSkills,
-                steeringInputs);
+                steeringInputs,
+                activeExecSessions);
         if (estimatedTokens <= limit) {
             return false;
         }
@@ -511,7 +594,8 @@ public class SpringAiCodexAgent implements CodexAgent {
                                             int step,
                                             List<ResolvedSkill> selectedSkills,
                                             List<SkillMetadata> availableSkills,
-                                            List<String> steeringInputs) {
+                                            List<String> steeringInputs,
+                                            List<PromptExecSessionContext> activeExecSessions) {
         ReconstructedThreadContext reconstructedContext = threadContextReconstructionService.reconstruct(threadId);
         ResolvedPrompt resolvedPrompt = promptAssemblyService.assemblePlannerPrompt(
                 reconstructedContext,
@@ -520,7 +604,8 @@ public class SpringAiCodexAgent implements CodexAgent {
                 step,
                 selectedSkills,
                 availableSkills,
-                steeringInputs);
+                steeringInputs,
+                activeExecSessions);
         String systemPrompt = resolvedPrompt.systemPrompt();
         String userPrompt = resolvedPrompt.userPrompt();
         return estimateTokens(systemPrompt) + estimateTokens(userPrompt);
@@ -548,31 +633,116 @@ public class SpringAiCodexAgent implements CodexAgent {
                                          Consumer<TurnItem> itemConsumer) {
         List<Map<String, Object>> results = new ArrayList<>();
         List<String> approvalIds = new ArrayList<>();
+        List<ExecSessionObservation> execSessionObservations = new ArrayList<>();
         boolean awaitingApproval = false;
-        for (int index = 0; index < actions.size(); index++) {
+        for (int index = 0; index < actions.size(); ) {
             ToolActionRequest action = actions.get(index);
+            if (isParallelSafe(action.action())) {
+                int waveStart = index;
+                int waveEnd = index;
+                while (waveEnd < actions.size() && isParallelSafe(actions.get(waveEnd).action())) {
+                    waveEnd++;
+                }
+                List<ToolActionRequest> waveActions = actions.subList(waveStart, waveEnd);
+                if (waveActions.size() > 1) {
+                    List<ParallelActionExecution> parallelExecutions = executeParallelWave(
+                            threadId,
+                            turnId,
+                            waveStart,
+                            waveActions);
+                    for (ParallelActionExecution execution : parallelExecutions) {
+                        appendActionExecution(
+                                execution,
+                                results,
+                                approvalIds,
+                                execSessionObservations,
+                                items,
+                                itemConsumer);
+                    }
+                    index = waveEnd;
+                    continue;
+                }
+            }
+
             Map<String, Object> entry = new LinkedHashMap<>();
             entry.put("index", index + 1);
             entry.put("action", action.action());
             entry.put("target", describeTarget(action));
             ActionExecutionOutcome actionOutcome = executeAction(threadId, turnId, action, items, itemConsumer);
-            entry.put("result", parseObservation(actionOutcome.observation()));
+            entry.put("result", parseObservation(reduceObservation(action.action(), actionOutcome.observation())));
             results.add(entry);
             approvalIds.addAll(actionOutcome.approvalIds());
+            if (actionOutcome.execSessionObservation() != null) {
+                execSessionObservations.add(actionOutcome.execSessionObservation());
+            }
             if (actionOutcome.awaitingApproval()) {
                 awaitingApproval = true;
                 break;
             }
+            index++;
         }
 
         try {
             return new BatchExecutionOutcome(
                     objectMapper.writeValueAsString(Map.of("results", results)),
                     awaitingApproval,
-                    List.copyOf(approvalIds));
+                    List.copyOf(approvalIds),
+                    List.copyOf(execSessionObservations));
         }
         catch (Exception exception) {
-            return new BatchExecutionOutcome(createErrorObservation(exception.getMessage()), awaitingApproval, List.copyOf(approvalIds));
+            return new BatchExecutionOutcome(
+                    createErrorObservation(exception.getMessage()),
+                    awaitingApproval,
+                    List.copyOf(approvalIds),
+                    List.copyOf(execSessionObservations));
+        }
+    }
+
+    private List<ParallelActionExecution> executeParallelWave(ThreadId threadId,
+                                                              TurnId turnId,
+                                                              int waveStartIndex,
+                                                              List<ToolActionRequest> waveActions) {
+        List<java.util.concurrent.CompletableFuture<ParallelActionExecution>> futures = new ArrayList<>();
+        for (int offset = 0; offset < waveActions.size(); offset++) {
+            final int actionIndex = waveStartIndex + offset;
+            final ToolActionRequest action = waveActions.get(offset);
+            futures.add(java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                List<TurnItem> localItems = new ArrayList<>();
+                ActionExecutionOutcome outcome = executeAction(threadId, turnId, action, localItems, null);
+                return new ParallelActionExecution(
+                        actionIndex,
+                        action,
+                        outcome,
+                        List.copyOf(localItems));
+            }));
+        }
+
+        List<ParallelActionExecution> executions = new ArrayList<>();
+        for (java.util.concurrent.CompletableFuture<ParallelActionExecution> future : futures) {
+            executions.add(future.join());
+        }
+        executions.sort(java.util.Comparator.comparingInt(ParallelActionExecution::index));
+        return executions;
+    }
+
+    private void appendActionExecution(ParallelActionExecution execution,
+                                       List<Map<String, Object>> results,
+                                       List<String> approvalIds,
+                                       List<ExecSessionObservation> execSessionObservations,
+                                       List<TurnItem> items,
+                                       Consumer<TurnItem> itemConsumer) {
+        Map<String, Object> entry = new LinkedHashMap<>();
+        entry.put("index", execution.index() + 1);
+        entry.put("action", execution.action().action());
+        entry.put("target", describeTarget(execution.action()));
+        entry.put("result", parseObservation(reduceObservation(execution.action().action(), execution.outcome().observation())));
+        results.add(entry);
+        approvalIds.addAll(execution.outcome().approvalIds());
+        if (execution.outcome().execSessionObservation() != null) {
+            execSessionObservations.add(execution.outcome().execSessionObservation());
+        }
+        for (TurnItem item : execution.items()) {
+            emitItem(items, itemConsumer, item);
         }
     }
 
@@ -610,10 +780,23 @@ public class SpringAiCodexAgent implements CodexAgent {
             observation = switch (action.action()) {
                 case READ_FILE -> objectMapper.writeValueAsString(fileReaderTool.readFile(action.path()));
                 case SEARCH_FILES -> objectMapper.writeValueAsString(fileSearchTool.search(action.query(), action.path()));
+                case LIST_DIR -> objectMapper.writeValueAsString(listDirTool.listDir(action.path(), action.maxDepth()));
+                case WEB_SEARCH -> objectMapper.writeValueAsString(webSearchTool.search(action.query(), action.maxResults()));
                 case APPLY_PATCH -> objectMapper.writeValueAsString(
                         filePatchTool.applyPatch(action.path(), action.oldText(), action.newText(), action.replaceAll()));
                 case WRITE_FILE -> objectMapper.writeValueAsString(fileWriterTool.writeFile(action.path(), action.content()));
                 case RUN_COMMAND -> objectMapper.writeValueAsString(shellCommandTool.runCommand(action.command()));
+                case EXEC_COMMAND -> objectMapper.writeValueAsString(requireExecCommandTool().execCommand(
+                        threadId,
+                        action.command(),
+                        action.yieldTimeMillis(),
+                        action.maxRuntimeMillis(),
+                        action.pty()));
+                case WRITE_STDIN -> objectMapper.writeValueAsString(requireExecCommandTool().writeStdin(
+                        threadId,
+                        action.sessionId(),
+                        action.input(),
+                        action.yieldTimeMillis()));
                 case SPAWN_AGENT -> {
                     AgentControl agentControl = requireAgentControl();
                     AgentSummary spawnedAgent = agentControl.spawnAgent(new AgentSpawnRequest(
@@ -789,7 +972,11 @@ public class SpringAiCodexAgent implements CodexAgent {
         ActionExecutionOutcome outcome = enrichApprovalObservation(threadId, turnId, action, observation, items, itemConsumer);
         observation = outcome.observation();
         emitItem(items, itemConsumer, toolResultItem(action.action().name(), summarizeToolResult(action.action(), observation)));
-        return outcome;
+        return new ActionExecutionOutcome(
+                outcome.observation(),
+                outcome.awaitingApproval(),
+                outcome.approvalIds(),
+                extractExecSessionObservation(action.action(), outcome.observation()));
     }
 
     PlannerStep parseDecision(String response) {
@@ -852,7 +1039,12 @@ public class SpringAiCodexAgent implements CodexAgent {
                 scratchpad,
                 step,
                 selectedSkills,
-                steeringInputs);
+                steeringInputs,
+                List.of());
+    }
+
+    List<PromptExecSessionContext> currentExecSessionsForPrompt() {
+        return activeExecSessionsForPrompt;
     }
 
     private String describeActions(List<ToolActionRequest> actions) {
@@ -870,10 +1062,25 @@ public class SpringAiCodexAgent implements CodexAgent {
             case SEARCH_FILES -> action.action()
                     + " query=" + blankToPlaceholder(action.query())
                     + " scope=" + blankToPlaceholder(action.path());
+            case LIST_DIR -> action.action()
+                    + " path=" + blankToPlaceholder(action.path())
+                    + " maxDepth=" + (action.maxDepth() == null ? "(default)" : action.maxDepth());
+            case WEB_SEARCH -> action.action()
+                    + " query=" + blankToPlaceholder(action.query())
+                    + " maxResults=" + (action.maxResults() == null ? "(default)" : action.maxResults());
             case APPLY_PATCH -> action.action()
                     + " path=" + blankToPlaceholder(action.path())
                     + " replaceAll=" + action.replaceAll();
             case RUN_COMMAND -> action.action() + " command=" + blankToPlaceholder(action.command());
+            case EXEC_COMMAND -> action.action()
+                    + " command=" + blankToPlaceholder(action.command())
+                    + " yieldTimeMillis=" + (action.yieldTimeMillis() == null ? "(default)" : action.yieldTimeMillis())
+                    + " maxRuntimeMillis=" + (action.maxRuntimeMillis() == null ? "(default)" : action.maxRuntimeMillis())
+                    + " pty=" + action.pty();
+            case WRITE_STDIN -> action.action()
+                    + " sessionId=" + blankToPlaceholder(action.sessionId())
+                    + " input=" + (action.input().isBlank() ? "(empty)" : "(provided)")
+                    + " yieldTimeMillis=" + (action.yieldTimeMillis() == null ? "(default)" : action.yieldTimeMillis());
             case SPAWN_AGENT -> action.action()
                     + " taskName=" + blankToPlaceholder(action.taskName())
                     + " nickname=" + blankToPlaceholder(action.nickname())
@@ -900,7 +1107,11 @@ public class SpringAiCodexAgent implements CodexAgent {
         return switch (action.action()) {
             case READ_FILE, WRITE_FILE, APPLY_PATCH -> blankToPlaceholder(action.path());
             case SEARCH_FILES -> "query=" + blankToPlaceholder(action.query()) + ", scope=" + blankToPlaceholder(action.path());
+            case LIST_DIR -> blankToPlaceholder(action.path());
+            case WEB_SEARCH -> "query=" + blankToPlaceholder(action.query());
             case RUN_COMMAND -> blankToPlaceholder(action.command());
+            case EXEC_COMMAND -> blankToPlaceholder(action.command());
+            case WRITE_STDIN -> blankToPlaceholder(action.sessionId());
             case SPAWN_AGENT -> blankToPlaceholder(action.taskName());
             case SEND_MESSAGE, ASSIGN_TASK, SEND_INPUT, RESUME_AGENT, CLOSE_AGENT -> blankToPlaceholder(action.threadId());
             case WAIT_AGENT -> action.threadIds().isEmpty()
@@ -937,6 +1148,18 @@ public class SpringAiCodexAgent implements CodexAgent {
                 if (root.has("entries") && root.path("entries").isArray()) {
                     summary.append(" entries=").append(root.path("entries").size());
                 }
+                if (root.has("hits") && root.path("hits").isArray()) {
+                    summary.append(" hits=").append(root.path("hits").size());
+                }
+                if (root.has("maxDepth")) {
+                    summary.append(" maxDepth=").append(root.path("maxDepth").asInt());
+                }
+                if (root.has("totalEntries")) {
+                    summary.append(" totalEntries=").append(root.path("totalEntries").asInt());
+                }
+                if (root.has("truncated")) {
+                    summary.append(" truncated=").append(root.path("truncated").asBoolean());
+                }
                 if (root.has("committedEntries") && root.path("committedEntries").isArray()) {
                     summary.append(" committed=").append(root.path("committedEntries").size());
                 }
@@ -952,11 +1175,20 @@ public class SpringAiCodexAgent implements CodexAgent {
                 if (root.has("totalMatches")) {
                     summary.append(" matches=").append(root.path("totalMatches").asInt());
                 }
+                if (root.has("totalHits")) {
+                    summary.append(" totalHits=").append(root.path("totalHits").asInt());
+                }
                 if (root.has("replacements")) {
                     summary.append(" replacements=").append(root.path("replacements").asInt());
                 }
                 if (root.has("exitCode")) {
                     summary.append(" exitCode=").append(root.path("exitCode").asInt());
+                }
+                if (root.has("sessionId") && !root.path("sessionId").asText("").isBlank()) {
+                    summary.append(" sessionId=").append(root.path("sessionId").asText());
+                }
+                if (root.has("processId") && !root.path("processId").asText("").isBlank()) {
+                    summary.append(" processId=").append(root.path("processId").asText());
                 }
                 if (root.has("executed")) {
                     summary.append(" executed=").append(root.path("executed").asBoolean());
@@ -966,6 +1198,12 @@ public class SpringAiCodexAgent implements CodexAgent {
                 }
                 if (root.has("threadId") && !root.path("threadId").asText("").isBlank()) {
                     summary.append(" threadId=").append(root.path("threadId").asText());
+                }
+                if (root.has("backend") && !root.path("backend").asText("").isBlank()) {
+                    summary.append(" backend=").append(root.path("backend").asText());
+                }
+                if (root.has("query") && !root.path("query").asText("").isBlank()) {
+                    summary.append(" query=").append(root.path("query").asText());
                 }
                 if (root.has("turnId") && !root.path("turnId").asText("").isBlank()) {
                     summary.append(" turnId=").append(root.path("turnId").asText());
@@ -1003,20 +1241,91 @@ public class SpringAiCodexAgent implements CodexAgent {
         return action.name() + " completed";
     }
 
+    private void updateActiveExecSessions(Map<String, ActiveExecSessionState> activeExecSessions,
+                                          List<ExecSessionObservation> execSessionObservations) {
+        if (activeExecSessions == null || execSessionObservations == null || execSessionObservations.isEmpty()) {
+            return;
+        }
+        for (ExecSessionObservation observation : execSessionObservations) {
+            if (observation == null || observation.sessionId().isBlank()) {
+                continue;
+            }
+            if (!observation.running()) {
+                activeExecSessions.remove(observation.sessionId());
+                continue;
+            }
+            ActiveExecSessionState current = activeExecSessions.get(observation.sessionId());
+            activeExecSessions.put(
+                    observation.sessionId(),
+                    current == null ? ActiveExecSessionState.from(observation) : current.merge(observation));
+        }
+    }
+
+    private List<PromptExecSessionContext> execSessionContexts(Map<String, ActiveExecSessionState> activeExecSessions) {
+        if (activeExecSessions == null || activeExecSessions.isEmpty()) {
+            return List.of();
+        }
+        return activeExecSessions.values().stream()
+                .map(ActiveExecSessionState::toPromptContext)
+                .toList();
+    }
+
+    private ExecSessionObservation extractExecSessionObservation(ToolAction action, String observation) {
+        if (action != ToolAction.EXEC_COMMAND && action != ToolAction.WRITE_STDIN) {
+            return null;
+        }
+        try {
+            JsonNode root = objectMapper.readTree(observation);
+            String sessionId = root.path("sessionId").asText("").trim();
+            if (sessionId.isBlank()) {
+                return null;
+            }
+            String status = root.path("status").asText("");
+            return new ExecSessionObservation(
+                    sessionId,
+                    root.path("command").asText(""),
+                    status,
+                    root.path("processId").canConvertToLong() ? root.path("processId").longValue() : null,
+                    root.path("pty").asBoolean(false),
+                    previewExecOutput(root.path("stdout").asText("")),
+                    previewExecOutput(root.path("stderr").asText("")),
+                    isRunningExecStatus(status),
+                    action == ToolAction.WRITE_STDIN ? 1 : 0);
+        }
+        catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private boolean isRunningExecStatus(String status) {
+        return "RUNNING".equalsIgnoreCase(status);
+    }
+
+    private String previewExecOutput(String text) {
+        if (text == null || text.isBlank()) {
+            return "";
+        }
+        String normalized = text.replace("\r\n", "\n").replace('\r', '\n').trim();
+        if (normalized.length() <= 240) {
+            return normalized;
+        }
+        return normalized.substring(0, 237) + "...";
+    }
+
     private ActionExecutionOutcome enrichApprovalObservation(ThreadId threadId,
                                                              TurnId turnId,
                                                              ToolActionRequest action,
                                                              String observation,
                                                              List<TurnItem> items,
                                                              Consumer<TurnItem> itemConsumer) {
-        if (action != null && action.action() != ToolAction.RUN_COMMAND) {
-            return new ActionExecutionOutcome(observation, false, List.of());
+        if (action != null && action.action() != ToolAction.RUN_COMMAND && action.action() != ToolAction.EXEC_COMMAND) {
+            return new ActionExecutionOutcome(observation, false, List.of(), null);
         }
 
         try {
             JsonNode root = objectMapper.readTree(observation);
             if (!(root instanceof ObjectNode objectNode)) {
-                return new ActionExecutionOutcome(observation, false, List.of());
+                return new ActionExecutionOutcome(observation, false, List.of(), null);
             }
 
             String decision = objectNode.path("approvalDecision").asText("");
@@ -1038,7 +1347,8 @@ public class SpringAiCodexAgent implements CodexAgent {
                 return new ActionExecutionOutcome(
                         objectMapper.writeValueAsString(objectNode),
                         true,
-                        List.of(request.approvalId().value()));
+                        List.of(request.approvalId().value()),
+                        null);
             }
             if (CommandApprovalDecision.BLOCK.name().equals(decision) && !executed) {
                 emitItem(items, itemConsumer, approvalItem(
@@ -1051,7 +1361,7 @@ public class SpringAiCodexAgent implements CodexAgent {
         catch (Exception ignored) {
             // Keep the original observation if enrichment fails.
         }
-        return new ActionExecutionOutcome(observation, false, List.of());
+        return new ActionExecutionOutcome(observation, false, List.of(), null);
     }
 
     private String shortApprovalId(String approvalId) {
@@ -1096,6 +1406,10 @@ public class SpringAiCodexAgent implements CodexAgent {
         catch (Exception exception) {
             return objectMapper.getNodeFactory().textNode(observation);
         }
+    }
+
+    private String reduceObservation(ToolAction action, String observation) {
+        return toolObservationReducer == null ? observation : toolObservationReducer.reduce(action == null ? null : action.name(), observation);
     }
 
     private String createErrorObservation(String error) {
@@ -1178,7 +1492,7 @@ public class SpringAiCodexAgent implements CodexAgent {
                 case SEND_MESSAGE -> org.dean.codex.protocol.item.CollabDeliveryState.QUEUED;
                 case ASSIGN_TASK, SEND_INPUT, SPAWN_AGENT, RESUME_AGENT -> org.dean.codex.protocol.item.CollabDeliveryState.DISPATCHED;
                 case CLOSE_AGENT -> org.dean.codex.protocol.item.CollabDeliveryState.COMPLETED;
-                case LIST_AGENTS, READ_FILE, SEARCH_FILES, APPLY_PATCH, WRITE_FILE, RUN_COMMAND -> null;
+                case LIST_AGENTS, READ_FILE, SEARCH_FILES, LIST_DIR, WEB_SEARCH, APPLY_PATCH, WRITE_FILE, RUN_COMMAND, EXEC_COMMAND, WRITE_STDIN -> null;
             };
         }
         return switch (action) {
@@ -1186,7 +1500,7 @@ public class SpringAiCodexAgent implements CodexAgent {
             case ASSIGN_TASK, SEND_INPUT, SPAWN_AGENT, RESUME_AGENT -> org.dean.codex.protocol.item.CollabDeliveryState.DISPATCHED;
             case WAIT_AGENT -> org.dean.codex.protocol.item.CollabDeliveryState.WAITING;
             case CLOSE_AGENT -> org.dean.codex.protocol.item.CollabDeliveryState.COMPLETED;
-            case LIST_AGENTS, READ_FILE, SEARCH_FILES, APPLY_PATCH, WRITE_FILE, RUN_COMMAND -> null;
+            case LIST_AGENTS, READ_FILE, SEARCH_FILES, LIST_DIR, WEB_SEARCH, APPLY_PATCH, WRITE_FILE, RUN_COMMAND, EXEC_COMMAND, WRITE_STDIN -> null;
         };
     }
 
@@ -1204,8 +1518,12 @@ public class SpringAiCodexAgent implements CodexAgent {
     private boolean isCollaborationAction(ToolAction action) {
         return switch (action) {
             case SPAWN_AGENT, SEND_MESSAGE, ASSIGN_TASK, SEND_INPUT, WAIT_AGENT, RESUME_AGENT, CLOSE_AGENT -> true;
-            case READ_FILE, SEARCH_FILES, APPLY_PATCH, WRITE_FILE, RUN_COMMAND, LIST_AGENTS -> false;
+            case READ_FILE, SEARCH_FILES, LIST_DIR, WEB_SEARCH, APPLY_PATCH, WRITE_FILE, RUN_COMMAND, EXEC_COMMAND, WRITE_STDIN, LIST_AGENTS -> false;
         };
+    }
+
+    private boolean isParallelSafe(ToolAction action) {
+        return action != null && toolCapabilityRegistry.supportsParallelExecution(action.name());
     }
 
     private String collaborationToolName(ToolAction action) {
@@ -1220,9 +1538,13 @@ public class SpringAiCodexAgent implements CodexAgent {
             case LIST_AGENTS -> "list_agents";
             case READ_FILE -> "read_file";
             case SEARCH_FILES -> "search_files";
+            case LIST_DIR -> "list_dir";
+            case WEB_SEARCH -> "web_search";
             case APPLY_PATCH -> "apply_patch";
             case WRITE_FILE -> "write_file";
             case RUN_COMMAND -> "run_command";
+            case EXEC_COMMAND -> "exec_command";
+            case WRITE_STDIN -> "write_stdin";
         };
     }
 
@@ -1304,12 +1626,15 @@ public class SpringAiCodexAgent implements CodexAgent {
             return new ToolActionRequest(
                     ToolAction.valueOf(normalizeActionName(actionText)),
                     textValue(actionNode.get("path")),
+                    firstNonNullInteger(parseInteger(actionNode.get("maxDepth")), parseInteger(actionNode.get("max_depth"))),
                     textValue(actionNode.get("query")),
                     textValue(actionNode.get("oldText")),
                     textValue(actionNode.get("newText")),
                     actionNode != null && actionNode.path("replaceAll").asBoolean(false),
                     textValue(actionNode.get("content")),
                     textValue(actionNode.get("command")),
+                    firstNonBlank(textValue(actionNode.get("sessionId")), textValue(actionNode.get("session_id"))),
+                    firstNonBlank(textValue(actionNode.get("input")), textValue(actionNode.get("chars"))),
                     textValue(actionNode.get("threadId")),
                     parseThreadIds(actionNode.get("threadIds")),
                     textValue(actionNode.get("taskName")),
@@ -1321,7 +1646,11 @@ public class SpringAiCodexAgent implements CodexAgent {
                     textValue(actionNode.get("model")),
                     textValue(actionNode.get("cwd")),
                     actionNode != null && actionNode.path("recursive").asBoolean(false),
-                    parseLong(actionNode.get("timeoutMillis")),
+                    firstNonNullInteger(parseInteger(actionNode.get("maxResults")), parseInteger(actionNode.get("max_results"))),
+                    firstNonNullLong(parseLong(actionNode.get("timeoutMillis")), parseLong(actionNode.get("timeout_millis"))),
+                    firstNonNullLong(parseLong(actionNode.get("yieldTimeMillis")), parseLong(actionNode.get("yield_time_ms"))),
+                    firstNonNullLong(parseLong(actionNode.get("maxRuntimeMillis")), parseLong(actionNode.get("max_runtime_ms"))),
+                    actionNode != null && actionNode.path("pty").asBoolean(false),
                     actionNode != null && actionNode.path("interrupt").asBoolean(false)
             );
         }
@@ -1345,6 +1674,19 @@ public class SpringAiCodexAgent implements CodexAgent {
                         return "Action %d (SEARCH_FILES) requires a non-blank query.".formatted(displayIndex);
                     }
                 }
+                case LIST_DIR -> {
+                    if (action.maxDepth() != null && action.maxDepth() < 0) {
+                        return "Action %d (LIST_DIR) requires maxDepth >= 0 when provided.".formatted(displayIndex);
+                    }
+                }
+                case WEB_SEARCH -> {
+                    if (action.query().isBlank()) {
+                        return "Action %d (WEB_SEARCH) requires a non-blank query.".formatted(displayIndex);
+                    }
+                    if (action.maxResults() != null && action.maxResults() < 1) {
+                        return "Action %d (WEB_SEARCH) requires maxResults >= 1 when provided.".formatted(displayIndex);
+                    }
+                }
                 case APPLY_PATCH -> {
                     if (action.path().isBlank()) {
                         return "Action %d (APPLY_PATCH) requires a non-blank path.".formatted(displayIndex);
@@ -1364,6 +1706,25 @@ public class SpringAiCodexAgent implements CodexAgent {
                 case RUN_COMMAND -> {
                     if (action.command().isBlank()) {
                         return "Action %d (RUN_COMMAND) requires a non-blank command.".formatted(displayIndex);
+                    }
+                }
+                case EXEC_COMMAND -> {
+                    if (action.command().isBlank()) {
+                        return "Action %d (EXEC_COMMAND) requires a non-blank command.".formatted(displayIndex);
+                    }
+                    if (action.yieldTimeMillis() != null && action.yieldTimeMillis() < 0L) {
+                        return "Action %d (EXEC_COMMAND) requires yieldTimeMillis >= 0 when provided.".formatted(displayIndex);
+                    }
+                    if (action.maxRuntimeMillis() != null && action.maxRuntimeMillis() < 0L) {
+                        return "Action %d (EXEC_COMMAND) requires maxRuntimeMillis >= 0 when provided.".formatted(displayIndex);
+                    }
+                }
+                case WRITE_STDIN -> {
+                    if (action.sessionId().isBlank()) {
+                        return "Action %d (WRITE_STDIN) requires a non-blank sessionId.".formatted(displayIndex);
+                    }
+                    if (action.yieldTimeMillis() != null && action.yieldTimeMillis() < 0L) {
+                        return "Action %d (WRITE_STDIN) requires yieldTimeMillis >= 0 when provided.".formatted(displayIndex);
                     }
                 }
                 case SPAWN_AGENT -> {
@@ -1466,6 +1827,14 @@ public class SpringAiCodexAgent implements CodexAgent {
         }
     }
 
+    private Long firstNonNullLong(Long first, Long second) {
+        return first != null ? first : second;
+    }
+
+    private Integer firstNonNullInteger(Integer first, Integer second) {
+        return first != null ? first : second;
+    }
+
     private String textValue(JsonNode node) {
         return node == null || node.isNull() ? "" : node.asText("");
     }
@@ -1494,12 +1863,23 @@ public class SpringAiCodexAgent implements CodexAgent {
         return new RuntimeErrorItem(new ItemId(UUID.randomUUID().toString()), message, Instant.now());
     }
 
+    private ExecCommandTool requireExecCommandTool() {
+        if (execCommandTool == null) {
+            throw new IllegalStateException("Unified exec command tool is unavailable in this runtime.");
+        }
+        return execCommandTool;
+    }
+
     enum ToolAction {
         READ_FILE,
         SEARCH_FILES,
+        LIST_DIR,
+        WEB_SEARCH,
         APPLY_PATCH,
         WRITE_FILE,
         RUN_COMMAND,
+        EXEC_COMMAND,
+        WRITE_STDIN,
         SPAWN_AGENT,
         SEND_MESSAGE,
         ASSIGN_TASK,
@@ -1512,12 +1892,15 @@ public class SpringAiCodexAgent implements CodexAgent {
 
     record ToolActionRequest(ToolAction action,
                              String path,
+                             Integer maxDepth,
                              String query,
                              String oldText,
                              String newText,
                              boolean replaceAll,
                              String content,
                              String command,
+                             String sessionId,
+                             String input,
                              String threadId,
                              List<ThreadId> threadIds,
                              String taskName,
@@ -1529,7 +1912,11 @@ public class SpringAiCodexAgent implements CodexAgent {
                              String model,
                              String cwd,
                              boolean recursive,
+                             Integer maxResults,
                              Long timeoutMillis,
+                             Long yieldTimeMillis,
+                             Long maxRuntimeMillis,
+                             boolean pty,
                              boolean interrupt) {
     }
 
@@ -1567,9 +1954,82 @@ public class SpringAiCodexAgent implements CodexAgent {
         return new SkillUseItem(new ItemId(UUID.randomUUID().toString()), selectedSkills, Instant.now());
     }
 
-    private record BatchExecutionOutcome(String observation, boolean awaitingApproval, List<String> approvalIds) {
+    record BatchExecutionOutcome(String observation,
+                                 boolean awaitingApproval,
+                                 List<String> approvalIds,
+                                 List<ExecSessionObservation> execSessionObservations) {
     }
 
-    private record ActionExecutionOutcome(String observation, boolean awaitingApproval, List<String> approvalIds) {
+    private record ParallelActionExecution(int index,
+                                           ToolActionRequest action,
+                                           ActionExecutionOutcome outcome,
+                                           List<TurnItem> items) {
+    }
+
+    private record ActionExecutionOutcome(String observation,
+                                          boolean awaitingApproval,
+                                          List<String> approvalIds,
+                                          ExecSessionObservation execSessionObservation) {
+    }
+
+    private record ExecSessionObservation(String sessionId,
+                                          String command,
+                                          String status,
+                                          Long processId,
+                                          boolean pty,
+                                          String stdoutPreview,
+                                          String stderrPreview,
+                                          boolean running,
+                                          int pollIncrement) {
+    }
+
+    private record ActiveExecSessionState(String sessionId,
+                                          String command,
+                                          String status,
+                                          Long processId,
+                                          boolean pty,
+                                          int pollCount,
+                                          String stdoutPreview,
+                                          String stderrPreview) {
+
+        private static ActiveExecSessionState from(ExecSessionObservation observation) {
+            return new ActiveExecSessionState(
+                    observation.sessionId(),
+                    observation.command(),
+                    observation.status(),
+                    observation.processId(),
+                    observation.pty(),
+                    observation.pollIncrement(),
+                    observation.stdoutPreview(),
+                    observation.stderrPreview());
+        }
+
+        private ActiveExecSessionState merge(ExecSessionObservation observation) {
+            return new ActiveExecSessionState(
+                    observation.sessionId(),
+                    preferNonBlank(observation.command(), command),
+                    preferNonBlank(observation.status(), status),
+                    observation.processId() == null ? processId : observation.processId(),
+                    observation.pty(),
+                    pollCount + observation.pollIncrement(),
+                    preferNonBlank(observation.stdoutPreview(), stdoutPreview),
+                    preferNonBlank(observation.stderrPreview(), stderrPreview));
+        }
+
+        private PromptExecSessionContext toPromptContext() {
+            return new PromptExecSessionContext(
+                    sessionId,
+                    command,
+                    status,
+                    processId,
+                    pty,
+                    pollCount,
+                    stdoutPreview,
+                    stderrPreview);
+        }
+
+        private String preferNonBlank(String first, String second) {
+            return first == null || first.isBlank() ? second : first;
+        }
     }
 }

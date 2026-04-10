@@ -17,6 +17,13 @@ import org.dean.codex.protocol.appserver.AgentSpawnResponse;
 import org.dean.codex.protocol.appserver.AgentWaitParams;
 import org.dean.codex.protocol.appserver.AgentWaitResponse;
 import org.dean.codex.protocol.appserver.AppServerNotification;
+import org.dean.codex.protocol.appserver.CommandExecParams;
+import org.dean.codex.protocol.appserver.CommandExecResizeParams;
+import org.dean.codex.protocol.appserver.CommandExecResizeResponse;
+import org.dean.codex.protocol.appserver.CommandExecResponse;
+import org.dean.codex.protocol.appserver.CommandExecTerminateParams;
+import org.dean.codex.protocol.appserver.CommandExecTerminateResponse;
+import org.dean.codex.protocol.appserver.CommandExecWriteParams;
 import org.dean.codex.protocol.appserver.InitializedNotification;
 import org.dean.codex.protocol.appserver.InitializeParams;
 import org.dean.codex.protocol.appserver.InitializeResponse;
@@ -104,6 +111,22 @@ public interface CodexAppServerSession extends AutoCloseable {
     ThreadMetadataUpdateResponse threadMetadataUpdate(ThreadMetadataUpdateParams params);
 
     ThreadShellCommandResponse threadShellCommand(ThreadShellCommandParams params);
+
+    default CommandExecResponse commandExec(CommandExecParams params) {
+        throw new UnsupportedOperationException("command/exec is not supported");
+    }
+
+    default CommandExecResponse commandExecWrite(CommandExecWriteParams params) {
+        throw new UnsupportedOperationException("command/exec/write is not supported");
+    }
+
+    default CommandExecResizeResponse commandExecResize(CommandExecResizeParams params) {
+        throw new UnsupportedOperationException("command/exec/resize is not supported");
+    }
+
+    default CommandExecTerminateResponse commandExecTerminate(CommandExecTerminateParams params) {
+        throw new UnsupportedOperationException("command/exec/terminate is not supported");
+    }
 
     ThreadBackgroundTerminalsCleanResponse threadBackgroundTerminalsClean(ThreadBackgroundTerminalsCleanParams params);
 

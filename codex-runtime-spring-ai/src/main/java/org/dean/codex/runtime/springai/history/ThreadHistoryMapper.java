@@ -26,6 +26,8 @@ import java.util.List;
 
 public final class ThreadHistoryMapper {
 
+    private static final int TOOL_RESULT_SUMMARY_LIMIT = 512;
+
     private ThreadHistoryMapper() {
     }
 
@@ -50,7 +52,11 @@ public final class ThreadHistoryMapper {
             return List.of(new HistoryToolCallItem(turnId, toolCallItem.toolName(), toolCallItem.target(), toolCallItem.createdAt()));
         }
         if (item instanceof ToolResultItem toolResultItem) {
-            return List.of(new HistoryToolResultItem(turnId, toolResultItem.toolName(), toolResultItem.summary(), toolResultItem.createdAt()));
+            return List.of(new HistoryToolResultItem(
+                    turnId,
+                    toolResultItem.toolName(),
+                    compactSummary(toolResultItem.summary()),
+                    toolResultItem.createdAt()));
         }
         if (item instanceof CollabToolCallItem collabToolCallItem) {
             return List.of(new HistoryCollabToolCallItem(
@@ -95,5 +101,15 @@ public final class ThreadHistoryMapper {
             historyItems.addAll(map(turnId, item));
         }
         return List.copyOf(historyItems);
+    }
+
+    private static String compactSummary(String summary) {
+        if (summary == null || summary.isBlank()) {
+            return "";
+        }
+        if (summary.length() <= TOOL_RESULT_SUMMARY_LIMIT) {
+            return summary;
+        }
+        return summary.substring(0, Math.max(0, TOOL_RESULT_SUMMARY_LIMIT - 3)) + "...";
     }
 }

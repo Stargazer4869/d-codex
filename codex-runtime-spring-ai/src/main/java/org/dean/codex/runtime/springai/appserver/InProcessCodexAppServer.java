@@ -3,6 +3,12 @@ package org.dean.codex.runtime.springai.appserver;
 import org.dean.codex.core.agent.AgentControl;
 import org.dean.codex.core.appserver.CodexAppServer;
 import org.dean.codex.core.appserver.CodexAppServerSession;
+import org.dean.codex.core.exec.ExecSessionEvent;
+import org.dean.codex.core.exec.ExecSessionEventType;
+import org.dean.codex.core.exec.ExecSessionId;
+import org.dean.codex.core.exec.ExecSessionManager;
+import org.dean.codex.core.exec.ExecSessionSummary;
+import org.dean.codex.core.exec.ExecStartRequest;
 import org.dean.codex.core.runtime.CodexRuntimeGateway;
 import org.dean.codex.core.tool.local.ShellCommandTool;
 import org.dean.codex.protocol.agent.AgentMessage;
@@ -29,6 +35,17 @@ import org.dean.codex.protocol.appserver.AgentWaitParams;
 import org.dean.codex.protocol.appserver.AgentWaitResponse;
 import org.dean.codex.protocol.appserver.AppServerNotification;
 import org.dean.codex.protocol.appserver.BackgroundTerminalSummary;
+import org.dean.codex.protocol.appserver.CommandExecParams;
+import org.dean.codex.protocol.appserver.CommandExecResizeParams;
+import org.dean.codex.protocol.appserver.CommandExecResizeResponse;
+import org.dean.codex.protocol.appserver.CommandExecResponse;
+import org.dean.codex.protocol.appserver.CommandExecTerminateParams;
+import org.dean.codex.protocol.appserver.CommandExecTerminateResponse;
+import org.dean.codex.protocol.appserver.CommandExecWriteParams;
+import org.dean.codex.protocol.appserver.CommandExecutionCompletedNotification;
+import org.dean.codex.protocol.appserver.CommandExecutionEvent;
+import org.dean.codex.protocol.appserver.CommandExecutionOutputDeltaNotification;
+import org.dean.codex.protocol.appserver.CommandExecutionTerminalInteractionNotification;
 import org.dean.codex.protocol.appserver.InitializeParams;
 import org.dean.codex.protocol.appserver.InitializeResponse;
 import org.dean.codex.protocol.appserver.InitializedNotification;
@@ -98,8 +115,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
-import java.util.concurrent.TimeUnit;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -114,24 +131,33 @@ public class InProcessCodexAppServer implements CodexAppServer {
 
     private final CodexRuntimeGateway runtimeGateway;
     private final ShellCommandTool shellCommandTool;
+    private final ExecSessionManager execSessionManager;
     private final ThreadCatalogService threadCatalogService;
-    private final Map<ThreadId, List<BackgroundTerminalHandle>> backgroundTerminals = new ConcurrentHashMap<>();
+    private final Map<ThreadId, List<BackgroundTerminalRef>> backgroundTerminals = new ConcurrentHashMap<>();
 
     @Autowired
     public InProcessCodexAppServer(CodexRuntimeGateway runtimeGateway,
                                    ShellCommandTool shellCommandTool,
+                                   ExecSessionManager execSessionManager,
                                    ThreadCatalogService threadCatalogService) {
         this.runtimeGateway = runtimeGateway;
         this.shellCommandTool = shellCommandTool;
+        this.execSessionManager = execSessionManager;
         this.threadCatalogService = threadCatalogService == null ? new DefaultThreadCatalogService() : threadCatalogService;
     }
 
     public InProcessCodexAppServer(CodexRuntimeGateway runtimeGateway) {
-        this(runtimeGateway, null, new DefaultThreadCatalogService());
+        this(runtimeGateway, null, null, new DefaultThreadCatalogService());
     }
 
     public InProcessCodexAppServer(CodexRuntimeGateway runtimeGateway, ShellCommandTool shellCommandTool) {
-        this(runtimeGateway, shellCommandTool, new DefaultThreadCatalogService());
+        this(runtimeGateway, shellCommandTool, null, new DefaultThreadCatalogService());
+    }
+
+    public InProcessCodexAppServer(CodexRuntimeGateway runtimeGateway,
+                                   ShellCommandTool shellCommandTool,
+                                   ExecSessionManager execSessionManager) {
+        this(runtimeGateway, shellCommandTool, execSessionManager, new DefaultThreadCatalogService());
     }
 
     @Override
@@ -141,12 +167,20 @@ public class InProcessCodexAppServer implements CodexAppServer {
 
     private final class Session implements CodexAppServerSession {
 
+        private static final Duration DEFAULT_EXEC_YIELD = Duration.ofSeconds(1);
+        private static final Duration DEFAULT_EXEC_POLL_YIELD = Duration.ofMillis(250);
+
         private final CopyOnWriteArrayList<Consumer<AppServerNotification>> subscribers = new CopyOnWriteArrayList<>();
         private final Map<ThreadId, AutoCloseable> runtimeSubscriptions = new ConcurrentHashMap<>();
         private final Set<String> optOutNotificationMethods = new HashSet<>();
+        private final AutoCloseable execSubscription;
         private String clientVersion;
         private boolean initializeCalled;
         private boolean initializedAcknowledged;
+
+        private Session() {
+            this.execSubscription = subscribeExecNotifications();
+        }
 
         @Override
         public synchronized InitializeResponse initialize(InitializeParams params) {
@@ -413,25 +447,96 @@ public class InProcessCodexAppServer implements CodexAppServer {
             if (shellCommandTool == null) {
                 throw new IllegalStateException("Thread shell command service is not configured");
             }
-            ShellCommandResult result = shellCommandTool.runCommand(command);
+            ShellCommandResult result = shellCommandTool.runCommand(threadId, command);
             return new ThreadShellCommandResponse(result);
+        }
+
+        @Override
+        public CommandExecResponse commandExec(CommandExecParams params) {
+            ensureReady();
+            ensureExecSessionManager();
+            ThreadId threadId = requireThreadId(params);
+            requireLoadedThread(threadId);
+            if (params.command() == null || params.command().isBlank()) {
+                throw new IllegalArgumentException("command is required");
+            }
+            var result = execSessionManager.start(new ExecStartRequest(
+                    threadId,
+                    params.command(),
+                    resolveExecWorkingDirectory(threadId, params.cwd()),
+                    durationOrDefault(params.yieldTimeMillis(), DEFAULT_EXEC_YIELD),
+                    durationOrDefault(params.maxRuntimeMillis(), Duration.ZERO),
+                    Boolean.TRUE.equals(params.pty())));
+            return new CommandExecResponse(
+                    toCommandExecutionEvent(result.session()),
+                    result.stdout(),
+                    result.stderr(),
+                    result.error());
+        }
+
+        @Override
+        public CommandExecResponse commandExecWrite(CommandExecWriteParams params) {
+            ensureReady();
+            ensureExecSessionManager();
+            ThreadId threadId = requireThreadId(params);
+            requireLoadedThread(threadId);
+            ExecSessionSummary session = requireExecSession(threadId, params.sessionId());
+            var result = execSessionManager.writeStdin(
+                    session.sessionId(),
+                    params.input(),
+                    durationOrDefault(params.yieldTimeMillis(), DEFAULT_EXEC_POLL_YIELD));
+            return new CommandExecResponse(
+                    toCommandExecutionEvent(result.session()),
+                    result.stdout(),
+                    result.stderr(),
+                    result.error());
+        }
+
+        @Override
+        public CommandExecResizeResponse commandExecResize(CommandExecResizeParams params) {
+            ensureReady();
+            ensureExecSessionManager();
+            ThreadId threadId = requireThreadId(params);
+            requireLoadedThread(threadId);
+            if (params.columns() < 1 || params.rows() < 1) {
+                throw new IllegalArgumentException("columns and rows must be >= 1");
+            }
+            ExecSessionSummary session = requireExecSession(threadId, params.sessionId());
+            boolean applied = execSessionManager.resize(session.sessionId(), params.columns(), params.rows());
+            ExecSessionSummary current = execSessionManager.session(session.sessionId()).orElse(session);
+            return new CommandExecResizeResponse(toCommandExecutionEvent(current), applied);
+        }
+
+        @Override
+        public CommandExecTerminateResponse commandExecTerminate(CommandExecTerminateParams params) {
+            ensureReady();
+            ensureExecSessionManager();
+            ThreadId threadId = requireThreadId(params);
+            requireLoadedThread(threadId);
+            ExecSessionSummary session = requireExecSession(threadId, params.sessionId());
+            boolean terminated = execSessionManager.terminate(session.sessionId());
+            ExecSessionSummary current = execSessionManager.session(session.sessionId()).orElse(session);
+            return new CommandExecTerminateResponse(toCommandExecutionEvent(current), terminated);
         }
 
         @Override
         public ThreadBackgroundTerminalsCleanResponse threadBackgroundTerminalsClean(ThreadBackgroundTerminalsCleanParams params) {
             ensureReady();
+            if (execSessionManager == null) {
+                return new ThreadBackgroundTerminalsCleanResponse(requireThreadId(params), 0);
+            }
             ThreadId threadId = requireThreadId(params);
-            List<BackgroundTerminalHandle> handles = backgroundTerminals.remove(threadId);
-            if (handles == null || handles.isEmpty()) {
+            List<BackgroundTerminalRef> refs = backgroundTerminals.remove(threadId);
+            if (refs == null || refs.isEmpty()) {
                 return new ThreadBackgroundTerminalsCleanResponse(threadId, 0);
             }
-            int cleanedCount = 0;
-            for (BackgroundTerminalHandle handle : handles) {
-                if (terminateBackgroundTerminal(handle)) {
-                    cleanedCount++;
+            for (BackgroundTerminalRef ref : refs) {
+                if (ref == null) {
+                    continue;
                 }
+                execSessionManager.terminate(ref.sessionId());
             }
-            return new ThreadBackgroundTerminalsCleanResponse(threadId, cleanedCount);
+            return new ThreadBackgroundTerminalsCleanResponse(threadId, refs.size());
         }
 
         @Override
@@ -589,6 +694,9 @@ public class InProcessCodexAppServer implements CodexAppServer {
 
         @Override
         public void close() throws Exception {
+            if (execSubscription != null) {
+                execSubscription.close();
+            }
             for (AutoCloseable runtimeSubscription : runtimeSubscriptions.values()) {
                 runtimeSubscription.close();
             }
@@ -637,174 +745,114 @@ public class InProcessCodexAppServer implements CodexAppServer {
         }
 
         private BackgroundTerminalHandle launchBackgroundTerminal(ThreadId threadId, String command) {
+            ensureExecSessionManager();
             String actualCommand = normalizeBackgroundCommand(command);
+            Path workingDirectory = resolveExecWorkingDirectory(threadId, null);
             if (actualCommand.isBlank()) {
-                return new BackgroundTerminalHandle(null, 0L, command == null ? "" : command, threadWorkspace(threadId), Instant.now(), new ShellCommandResult(
+                return new BackgroundTerminalHandle(null, 0L, command == null ? "" : command, workingDirectory.toString(), Instant.now(), new ShellCommandResult(
                         false,
                         command == null ? "" : command,
                         -1,
                         "",
                         "",
                         false,
-                        threadWorkspace(threadId),
+                        workingDirectory.toString(),
                         false,
                         org.dean.codex.protocol.tool.CommandApprovalDecision.BLOCK,
                         "Command must not be blank.",
                         "Command must not be blank."));
             }
-
-            Process process;
-            try {
-                process = new ProcessBuilder("zsh", "-lc", actualCommand + " & echo $!")
-                        .directory(Path.of(threadWorkspace(threadId)).toFile())
-                        .start();
-            }
-            catch (Exception exception) {
-                return new BackgroundTerminalHandle(null, 0L, command, threadWorkspace(threadId), Instant.now(), new ShellCommandResult(
-                        false,
+            var result = execSessionManager.start(new ExecStartRequest(
+                    threadId,
+                    actualCommand,
+                    workingDirectory,
+                    DEFAULT_EXEC_POLL_YIELD,
+                    Duration.ZERO,
+                    false));
+            ExecSessionSummary session = result.session();
+            if (!session.running()) {
+                String error = result.error();
+                if (error == null || error.isBlank()) {
+                    error = "Background command exited before it could remain active.";
+                }
+                return new BackgroundTerminalHandle(
+                        null,
+                        session.processId() == null ? 0L : session.processId(),
                         command,
-                        -1,
-                        "",
-                        "",
-                        false,
-                        threadWorkspace(threadId),
-                        false,
-                        org.dean.codex.protocol.tool.CommandApprovalDecision.ALLOW,
-                        "Background terminal launch requested.",
-                        exception.getMessage()));
+                        session.workingDirectory(),
+                        session.startedAt(),
+                        new ShellCommandResult(
+                                false,
+                                command,
+                                session.exitCode() == null ? -1 : session.exitCode(),
+                                result.stdout(),
+                                result.stderr(),
+                                false,
+                                session.workingDirectory(),
+                                !session.status().equals(org.dean.codex.core.exec.ExecSessionStatus.START_FAILED),
+                                org.dean.codex.protocol.tool.CommandApprovalDecision.ALLOW,
+                                "Background terminal launch requested.",
+                                error));
             }
 
-            String stdout;
-            String stderr;
-            try {
-                boolean finished = process.waitFor(5, TimeUnit.SECONDS);
-                stdout = finished ? readProcessOutput(process.getInputStream()) : "";
-                stderr = finished ? readProcessOutput(process.getErrorStream()) : "";
-                if (!finished) {
-                    process.destroyForcibly();
-                    return new BackgroundTerminalHandle(null, 0L, command, threadWorkspace(threadId), Instant.now(), new ShellCommandResult(
-                            false,
+            BackgroundTerminalRef ref = new BackgroundTerminalRef(session.sessionId(), command);
+            backgroundTerminals.computeIfAbsent(threadId, ignored -> new CopyOnWriteArrayList<>()).add(ref);
+            BackgroundTerminalSummary summary = toBackgroundTerminalSummary(ref, session);
+            String startupMessage = "Background terminal started (pid=%d).".formatted(summary.pid());
+            String stdout = result.stdout().isBlank() ? startupMessage : startupMessage + System.lineSeparator() + result.stdout();
+            return new BackgroundTerminalHandle(
+                    summary.terminalId(),
+                    summary.pid(),
+                    summary.command(),
+                    summary.workingDirectory(),
+                    summary.startedAt(),
+                    new ShellCommandResult(
+                            true,
                             command,
-                            -1,
-                            "",
-                            "",
+                            0,
+                            stdout,
+                            result.stderr(),
                             false,
-                            threadWorkspace(threadId),
-                            false,
+                            session.workingDirectory(),
+                            true,
                             org.dean.codex.protocol.tool.CommandApprovalDecision.ALLOW,
                             "Background terminal launch requested.",
-                            "Background terminal launcher did not exit cleanly."));
-                }
-            }
-            catch (Exception exception) {
-                process.destroyForcibly();
-                return new BackgroundTerminalHandle(null, 0L, command, threadWorkspace(threadId), Instant.now(), new ShellCommandResult(
-                        false,
-                        command,
-                        -1,
-                        "",
-                        "",
-                        false,
-                        threadWorkspace(threadId),
-                        false,
-                        org.dean.codex.protocol.tool.CommandApprovalDecision.ALLOW,
-                        "Background terminal launch requested.",
-                        exception.getMessage()));
-            }
-
-            long pid = parseBackgroundPid(stdout);
-            if (pid < 1) {
-                return new BackgroundTerminalHandle(null, 0L, command, threadWorkspace(threadId), Instant.now(), new ShellCommandResult(
-                        false,
-                        command,
-                        -1,
-                        stdout,
-                        stderr,
-                        false,
-                        threadWorkspace(threadId),
-                        false,
-                        org.dean.codex.protocol.tool.CommandApprovalDecision.ALLOW,
-                        "Background terminal launch requested.",
-                        "Unable to determine background process id."));
-            }
-
-            BackgroundTerminalHandle handle = new BackgroundTerminalHandle(
-                    UUID.randomUUID().toString(),
-                    pid,
-                    command,
-                    threadWorkspace(threadId),
-                    Instant.now(),
-                    new ShellCommandResult(
-                    true,
-                    command,
-                    0,
-                    "Background terminal started (pid=%d).".formatted(pid),
-                    stderr,
-                    false,
-                    threadWorkspace(threadId),
-                    true,
-                    org.dean.codex.protocol.tool.CommandApprovalDecision.ALLOW,
-                    "Background terminal launch requested.",
-                    ""));
-            backgroundTerminals.computeIfAbsent(threadId, ignored -> new CopyOnWriteArrayList<>()).add(handle);
-            return handle;
-        }
-
-        private boolean terminateBackgroundTerminal(BackgroundTerminalHandle handle) {
-            if (handle == null) {
-                return false;
-            }
-            ProcessHandle.of(handle.pid()).ifPresent(processHandle -> {
-                if (processHandle.isAlive()) {
-                    processHandle.destroy();
-                    try {
-                        processHandle.onExit().get(1, TimeUnit.SECONDS);
-                    }
-                    catch (Exception ignored) {
-                        processHandle.destroyForcibly();
-                    }
-                }
-            });
-            return true;
+                            ""));
         }
 
         private List<BackgroundTerminalSummary> activeBackgroundTerminals(ThreadId threadId) {
             if (threadId == null) {
                 return List.of();
             }
-            List<BackgroundTerminalHandle> handles = backgroundTerminals.get(threadId);
-            if (handles == null || handles.isEmpty()) {
+            if (execSessionManager == null) {
                 return List.of();
             }
-            List<BackgroundTerminalHandle> activeHandles = handles.stream()
-                    .filter(this::isBackgroundTerminalAlive)
-                    .toList();
-            if (activeHandles.size() != handles.size()) {
-                if (activeHandles.isEmpty()) {
-                    backgroundTerminals.remove(threadId, handles);
+            List<BackgroundTerminalRef> refs = backgroundTerminals.get(threadId);
+            if (refs == null || refs.isEmpty()) {
+                return List.of();
+            }
+            List<BackgroundTerminalRef> activeRefs = new CopyOnWriteArrayList<>();
+            List<BackgroundTerminalSummary> activeSummaries = new CopyOnWriteArrayList<>();
+            for (BackgroundTerminalRef ref : refs) {
+                if (ref == null) {
+                    continue;
+                }
+                ExecSessionSummary session = execSessionManager.session(ref.sessionId()).orElse(null);
+                if (session == null || !session.running()) {
+                    continue;
+                }
+                activeRefs.add(ref);
+                activeSummaries.add(toBackgroundTerminalSummary(ref, session));
+            }
+            if (activeRefs.size() != refs.size()) {
+                if (activeRefs.isEmpty()) {
+                    backgroundTerminals.remove(threadId, refs);
                 }
                 else {
-                    backgroundTerminals.put(threadId, new CopyOnWriteArrayList<>(activeHandles));
+                    backgroundTerminals.put(threadId, activeRefs);
                 }
             }
-            return activeHandles.stream()
-                    .map(BackgroundTerminalHandle::summary)
-                    .toList();
-        }
-
-        private boolean isBackgroundTerminalAlive(BackgroundTerminalHandle handle) {
-            return handle != null
-                    && handle.pid() > 0
-                    && ProcessHandle.of(handle.pid()).map(ProcessHandle::isAlive).orElse(false);
-        }
-
-        private String threadWorkspace(ThreadId threadId) {
-            return runtimeGateway.listThreads().stream()
-                    .filter(thread -> thread.threadId().equals(threadId))
-                    .map(ThreadSummary::cwd)
-                    .filter(cwd -> cwd != null && !cwd.isBlank())
-                    .findFirst()
-                    .orElseGet(() -> Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize().toString());
+            return List.copyOf(activeSummaries);
         }
 
         private String normalizeBackgroundCommand(String command) {
@@ -818,30 +866,13 @@ public class InProcessCodexAppServer implements CodexAppServer {
             return trimmed.substring(0, trimmed.length() - 1).trim();
         }
 
-        private long parseBackgroundPid(String stdout) {
-            if (stdout == null || stdout.isBlank()) {
-                return -1;
-            }
-            try {
-                return Long.parseLong(stdout.trim().split("\\s+")[0]);
-            }
-            catch (Exception exception) {
-                return -1;
-            }
-        }
-
-        private String readProcessOutput(java.io.InputStream stream) throws java.io.IOException {
-            try (java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.InputStreamReader(stream))) {
-                StringBuilder output = new StringBuilder();
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (!output.isEmpty()) {
-                        output.append(System.lineSeparator());
-                    }
-                    output.append(line);
-                }
-                return output.toString();
-            }
+        private BackgroundTerminalSummary toBackgroundTerminalSummary(BackgroundTerminalRef ref, ExecSessionSummary session) {
+            return new BackgroundTerminalSummary(
+                    ref.sessionId().value(),
+                    session.processId() == null ? 0L : session.processId(),
+                    ref.command(),
+                    session.workingDirectory(),
+                    session.startedAt());
         }
 
         private void publishRuntimeNotification(RuntimeNotification notification) {
@@ -857,6 +888,51 @@ public class InProcessCodexAppServer implements CodexAppServer {
             if (mapped != null) {
                 publish(mapped);
             }
+        }
+
+        private AutoCloseable subscribeExecNotifications() {
+            if (execSessionManager == null) {
+                return () -> {
+                };
+            }
+            return execSessionManager.subscribe(this::publishExecNotification);
+        }
+
+        private void publishExecNotification(ExecSessionEvent event) {
+            if (event == null || event.session() == null || event.session().threadId() == null) {
+                return;
+            }
+            ThreadId threadId = event.session().threadId();
+            if (!runtimeSubscriptions.containsKey(threadId)) {
+                return;
+            }
+            AppServerNotification mapped = switch (event.type()) {
+                case OUTPUT_DELTA -> new CommandExecutionOutputDeltaNotification(
+                        toCommandExecutionEvent(event.session()),
+                        event.stdout(),
+                        event.stderr());
+                case TERMINAL_INTERACTION -> new CommandExecutionTerminalInteractionNotification(
+                        toCommandExecutionEvent(event.session()),
+                        event.terminalInteraction() == null ? null : event.terminalInteraction().kind(),
+                        event.terminalInteraction() == null ? null : event.terminalInteraction().inputLength(),
+                        event.terminalInteraction() == null ? null : event.terminalInteraction().columns(),
+                        event.terminalInteraction() == null ? null : event.terminalInteraction().rows());
+                case COMPLETED -> new CommandExecutionCompletedNotification(toCommandExecutionEvent(event.session()));
+            };
+            publish(mapped);
+        }
+
+        private CommandExecutionEvent toCommandExecutionEvent(ExecSessionSummary session) {
+            return new CommandExecutionEvent(
+                    session.sessionId().value(),
+                    session.threadId(),
+                    session.command(),
+                    session.workingDirectory(),
+                    session.processId(),
+                    session.status().name(),
+                    session.startedAt(),
+                    session.completedAt(),
+                    session.exitCode());
         }
 
         private void publish(AppServerNotification notification) {
@@ -930,11 +1006,11 @@ public class InProcessCodexAppServer implements CodexAppServer {
     }
 
         private record BackgroundTerminalHandle(String terminalId,
-                                            long pid,
-                                            String command,
-                                            String workingDirectory,
-                                            Instant startedAt,
-                                            ShellCommandResult result) {
+                                                long pid,
+                                                String command,
+                                                String workingDirectory,
+                                                Instant startedAt,
+                                                ShellCommandResult result) {
 
         private BackgroundTerminalSummary summary() {
             if (terminalId == null || pid < 1) {
@@ -942,6 +1018,9 @@ public class InProcessCodexAppServer implements CodexAppServer {
             }
             return new BackgroundTerminalSummary(terminalId, pid, command, workingDirectory, startedAt);
         }
+    }
+
+    private record BackgroundTerminalRef(ExecSessionId sessionId, String command) {
     }
 
     private ThreadId requireThreadId(ThreadResumeParams params) {
@@ -980,6 +1059,34 @@ public class InProcessCodexAppServer implements CodexAppServer {
     }
 
     private ThreadId requireThreadId(ThreadShellCommandParams params) {
+        if (params == null || params.threadId() == null) {
+            throw new IllegalArgumentException("threadId is required");
+        }
+        return params.threadId();
+    }
+
+    private ThreadId requireThreadId(CommandExecParams params) {
+        if (params == null || params.threadId() == null) {
+            throw new IllegalArgumentException("threadId is required");
+        }
+        return params.threadId();
+    }
+
+    private ThreadId requireThreadId(CommandExecWriteParams params) {
+        if (params == null || params.threadId() == null) {
+            throw new IllegalArgumentException("threadId is required");
+        }
+        return params.threadId();
+    }
+
+    private ThreadId requireThreadId(CommandExecResizeParams params) {
+        if (params == null || params.threadId() == null) {
+            throw new IllegalArgumentException("threadId is required");
+        }
+        return params.threadId();
+    }
+
+    private ThreadId requireThreadId(CommandExecTerminateParams params) {
         if (params == null || params.threadId() == null) {
             throw new IllegalArgumentException("threadId is required");
         }
@@ -1053,5 +1160,46 @@ public class InProcessCodexAppServer implements CodexAppServer {
         if (!runtimeGateway.loadedThreads().contains(threadId)) {
             throw new IllegalStateException("Thread is not loaded: " + threadId.value());
         }
+    }
+
+    private void ensureExecSessionManager() {
+        if (execSessionManager == null) {
+            throw new IllegalStateException("Command exec service is not configured");
+        }
+    }
+
+    private Duration durationOrDefault(Long millis, Duration defaultValue) {
+        if (millis == null) {
+            return defaultValue;
+        }
+        if (millis < 0) {
+            throw new IllegalArgumentException("Duration millis must be >= 0");
+        }
+        return Duration.ofMillis(millis);
+    }
+
+    private Path resolveExecWorkingDirectory(ThreadId threadId, String cwd) {
+        String effectiveCwd = cwd;
+        if (effectiveCwd == null || effectiveCwd.isBlank()) {
+            effectiveCwd = runtimeGateway.listThreads().stream()
+                    .filter(thread -> thread.threadId().equals(threadId))
+                    .map(ThreadSummary::cwd)
+                    .filter(value -> value != null && !value.isBlank())
+                    .findFirst()
+                    .orElseGet(() -> Path.of("").toAbsolutePath().normalize().toString());
+        }
+        return Path.of(effectiveCwd).toAbsolutePath().normalize();
+    }
+
+    private ExecSessionSummary requireExecSession(ThreadId threadId, String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            throw new IllegalArgumentException("sessionId is required");
+        }
+        ExecSessionSummary session = execSessionManager.session(new ExecSessionId(sessionId))
+                .orElseThrow(() -> new IllegalArgumentException("Unknown exec session id: " + sessionId));
+        if (!threadId.equals(session.threadId())) {
+            throw new IllegalArgumentException("Exec session " + sessionId + " does not belong to thread " + threadId.value());
+        }
+        return session;
     }
 }

@@ -74,7 +74,8 @@ public class DefaultPromptAssemblyService implements PromptAssemblyService {
                                                 int step,
                                                 List<ResolvedSkill> selectedSkills,
                                                 List<SkillMetadata> availableSkills,
-                                                List<String> steeringInputs) {
+                                                List<String> steeringInputs,
+                                                List<PromptExecSessionContext> activeExecSessions) {
         ThreadId threadId = reconstructedContext == null ? null : reconstructedContext.threadId();
         ResolvedPromptInstructions instructions = resolveInstructions(threadId, availableSkills);
         ResolvedToolContract toolContract = resolveToolContract();
@@ -85,7 +86,8 @@ public class DefaultPromptAssemblyService implements PromptAssemblyService {
                 scratchpad,
                 step,
                 selectedSkills,
-                steeringInputs);
+                steeringInputs,
+                activeExecSessions);
         return new ResolvedPrompt(
                 instructions,
                 toolContract,
@@ -107,8 +109,16 @@ public class DefaultPromptAssemblyService implements PromptAssemblyService {
                                   String scratchpad,
                                   int step,
                                   List<ResolvedSkill> selectedSkills,
-                                  List<String> steeringInputs) {
-        return renderUserPrompt(resolveContext(reconstructedContext, input, scratchpad, step, selectedSkills, steeringInputs));
+                                  List<String> steeringInputs,
+                                  List<PromptExecSessionContext> activeExecSessions) {
+        return renderUserPrompt(resolveContext(
+                reconstructedContext,
+                input,
+                scratchpad,
+                step,
+                selectedSkills,
+                steeringInputs,
+                activeExecSessions));
     }
 
     private ResolvedPromptInstructions resolveInstructions(ThreadId threadId, List<SkillMetadata> availableSkills) {
@@ -140,7 +150,10 @@ public class DefaultPromptAssemblyService implements PromptAssemblyService {
                         "Return either a non-empty actions array or finalAnswer.",
                         "Do not return more than %d actions in one step.".formatted(maxActionsPerStep),
                         "Actions are executed in the order you provide them.",
+                        "Independent read-only actions may be batched together; keep writes, shell commands, approvals, and sub-agent control separate.",
                         "Omit unused fields or set them to null.",
+                        "Prefer LIST_DIR to discover directory structure before reading full files.",
+                        "Prefer WEB_SEARCH for external documentation, ecosystem facts, or recent references when local search is not enough.",
                         "Prefer SEARCH_FILES to locate code before reading full files.",
                         "Prefer APPLY_PATCH for targeted edits and WRITE_FILE only for new files or full rewrites.",
                         "Include editPlan whenever you expect to modify files.",
@@ -148,6 +161,7 @@ public class DefaultPromptAssemblyService implements PromptAssemblyService {
                         "Use agent delegation when a task is clearer as a focused sub-task than as a local edit batch.",
                         "Prefer inspection, tests, and small verified edits.",
                         "Shell commands may be allowed, require approval, or be blocked. If a command is not executed, use the tool result to adapt.",
+                        "Prefer exec_command and write_stdin for long-running commands that may need repeated polling or stdin.",
                         "Avoid destructive shell commands.",
                         "Keep all paths relative to the workspace root.",
                         "After each batch, use the observation from all executed actions before deciding the next step."),
@@ -159,7 +173,8 @@ public class DefaultPromptAssemblyService implements PromptAssemblyService {
                                                  String scratchpad,
                                                  int step,
                                                  List<ResolvedSkill> selectedSkills,
-                                                 List<String> steeringInputs) {
+                                                 List<String> steeringInputs,
+                                                 List<PromptExecSessionContext> activeExecSessions) {
         ThreadId threadId = reconstructedContext == null ? null : reconstructedContext.threadId();
         List<ConversationMessage> recentMessages = reconstructedContext == null ? List.of() : reconstructedContext.recentMessages();
         List<ReconstructedTurnActivity> recentActivities = reconstructedContext == null ? List.of() : reconstructedContext.recentActivities();
@@ -167,6 +182,7 @@ public class DefaultPromptAssemblyService implements PromptAssemblyService {
                 threadId,
                 recentMessages,
                 recentActivities,
+                activeExecSessions,
                 input,
                 scratchpad,
                 step,
@@ -208,6 +224,7 @@ public class DefaultPromptAssemblyService implements PromptAssemblyService {
         String eventBlock = context.recentActivities().stream()
                 .map(activity -> renderActivity(context.threadId(), activity))
                 .collect(Collectors.joining(System.lineSeparator()));
+        String execSessionBlock = renderActiveExecSessions(context.activeExecSessions());
 
         return """
                 Planner step number: %d of %d
@@ -219,6 +236,9 @@ public class DefaultPromptAssemblyService implements PromptAssemblyService {
                 %s
 
                 Recent turn events:
+                %s
+
+                Active exec sessions:
                 %s
 
                 Selected skill instructions:
@@ -240,6 +260,7 @@ public class DefaultPromptAssemblyService implements PromptAssemblyService {
                 context.threadId() == null ? "(none)" : context.threadId().value(),
                 historyBlock.isBlank() ? "(none)" : historyBlock,
                 eventBlock.isBlank() ? "(none)" : eventBlock,
+                execSessionBlock,
                 renderSelectedSkills(context.selectedSkills()),
                 context.steeringInputs().isEmpty() ? "(none)" : String.join(System.lineSeparator(), context.steeringInputs()),
                 context.latestUserRequest(),
@@ -280,6 +301,32 @@ public class DefaultPromptAssemblyService implements PromptAssemblyService {
                         skill.metadata().name(),
                         skill.metadata().path(),
                         skill.instructions().trim()))
+                .collect(Collectors.joining(System.lineSeparator()));
+    }
+
+    private String renderActiveExecSessions(List<PromptExecSessionContext> activeExecSessions) {
+        if (activeExecSessions == null || activeExecSessions.isEmpty()) {
+            return "(none)";
+        }
+        return activeExecSessions.stream()
+                .map(session -> """
+                        - sessionId: %s
+                          status: %s
+                          command: %s
+                          processId: %s
+                          pty: %s
+                          pollCount: %d
+                          latest stdout: %s
+                          latest stderr: %s
+                        """.formatted(
+                        blankToPlaceholder(session.sessionId()),
+                        blankToPlaceholder(session.status()),
+                        blankToPlaceholder(session.command()),
+                        session.processId() == null ? "(none)" : session.processId(),
+                        session.pty(),
+                        session.pollCount(),
+                        blankToPlaceholder(session.stdoutPreview()),
+                        blankToPlaceholder(session.stderrPreview())))
                 .collect(Collectors.joining(System.lineSeparator()));
     }
 

@@ -7,7 +7,10 @@ import org.dean.codex.core.context.ThreadContextReconstructionService;
 import org.dean.codex.core.conversation.InMemoryConversationStore;
 import org.dean.codex.core.skill.ResolvedSkill;
 import org.dean.codex.core.skill.SkillService;
+import org.dean.codex.core.tool.local.ExecCommandTool;
+import org.dean.codex.core.tool.local.ListDirTool;
 import org.dean.codex.core.tool.local.ShellCommandTool;
+import org.dean.codex.core.tool.local.WebSearchTool;
 import org.dean.codex.protocol.approval.ApprovalId;
 import org.dean.codex.protocol.approval.ApprovalStatus;
 import org.dean.codex.protocol.approval.CommandApprovalRequest;
@@ -26,12 +29,15 @@ import org.dean.codex.protocol.conversation.ThreadId;
 import org.dean.codex.protocol.conversation.TurnId;
 import org.dean.codex.protocol.conversation.TurnStatus;
 import org.dean.codex.protocol.tool.CommandApprovalDecision;
+import org.dean.codex.protocol.tool.ExecCommandResult;
 import org.dean.codex.protocol.tool.FileReadResult;
 import org.dean.codex.protocol.tool.FilePatchResult;
 import org.dean.codex.protocol.tool.FileSearchResult;
 import org.dean.codex.protocol.tool.FileWriteResult;
+import org.dean.codex.protocol.tool.ListDirResult;
 import org.dean.codex.protocol.tool.SearchMatch;
 import org.dean.codex.protocol.tool.ShellCommandResult;
+import org.dean.codex.protocol.tool.WebSearchResult;
 import org.dean.codex.protocol.item.CollabToolCallItem;
 import org.dean.codex.protocol.item.CollabToolCallStatus;
 import org.dean.codex.protocol.item.ToolCallItem;
@@ -48,6 +54,9 @@ import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.core.io.Resource;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.nio.charset.Charset;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -56,6 +65,9 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
@@ -76,6 +88,8 @@ class SpringAiCodexAgentTest {
                 new NoOpChatClientBuilder(),
                 path -> new FileReadResult(true, path, "", false, 0, ""),
                 (query, scope) -> new FileSearchResult(true, query, scope, List.of(new SearchMatch("pom.xml", 1, "<project>")), 1, false, ""),
+                (path, maxDepth) -> new ListDirResult(true, path, maxDepth == null ? 1 : maxDepth, List.of(), 0, false, ""),
+                new NoOpWebSearchTool(),
                 (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
                 (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
                 new StubShellCommandTool(),
@@ -156,6 +170,28 @@ class SpringAiCodexAgentTest {
     }
 
     @Test
+    void parseDecisionSupportsListDirActions() {
+        SpringAiCodexAgent.PlannerStep step = agent.parseDecision("""
+                {
+                  "summary": "Discover the repository layout",
+                  "actions": [
+                    {
+                      "action": "LIST_DIR",
+                      "path": "src",
+                      "maxDepth": 2
+                    }
+                  ]
+                }
+                """);
+
+        assertFalse(step.isFinished());
+        assertNull(step.validationError());
+        assertEquals(SpringAiCodexAgent.ToolAction.LIST_DIR, step.actions().get(0).action());
+        assertEquals("src", step.actions().get(0).path());
+        assertEquals(Integer.valueOf(2), step.actions().get(0).maxDepth());
+    }
+
+    @Test
     void parseDecisionRejectsPatchWithoutOldText() {
         SpringAiCodexAgent.PlannerStep step = agent.parseDecision("""
                 {
@@ -215,11 +251,49 @@ class SpringAiCodexAgentTest {
     }
 
     @Test
+    void parseDecisionSupportsUnifiedExecActions() {
+        SpringAiCodexAgent.PlannerStep step = agent.parseDecision("""
+                {
+                  "summary": "Run and poll a command",
+                  "actions": [
+                    {
+                      "action": "exec_command",
+                      "command": "npm test",
+                      "yieldTimeMillis": 10000,
+                      "maxRuntimeMillis": 60000,
+                      "pty": true
+                    },
+                    {
+                      "action": "write_stdin",
+                      "sessionId": "session-1",
+                      "input": "",
+                      "yieldTimeMillis": 250
+                    }
+                  ]
+                }
+                """);
+
+        assertFalse(step.isFinished());
+        assertNull(step.validationError());
+        assertEquals(SpringAiCodexAgent.ToolAction.EXEC_COMMAND, step.actions().get(0).action());
+        assertEquals("npm test", step.actions().get(0).command());
+        assertEquals(Long.valueOf(10000), step.actions().get(0).yieldTimeMillis());
+        assertEquals(Long.valueOf(60000), step.actions().get(0).maxRuntimeMillis());
+        assertTrue(step.actions().get(0).pty());
+        assertEquals(SpringAiCodexAgent.ToolAction.WRITE_STDIN, step.actions().get(1).action());
+        assertEquals("session-1", step.actions().get(1).sessionId());
+        assertEquals("", step.actions().get(1).input());
+        assertEquals(Long.valueOf(250), step.actions().get(1).yieldTimeMillis());
+    }
+
+    @Test
     void parseDecisionSupportsSubAgentActions() {
         SpringAiCodexAgent parsingAgent = new SpringAiCodexAgent(
                 new NoOpChatClientBuilder(),
                 path -> new FileReadResult(true, path, "", false, 0, ""),
                 (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                (path, maxDepth) -> new ListDirResult(true, path, maxDepth == null ? 1 : maxDepth, List.of(), 0, false, ""),
+                new NoOpWebSearchTool(),
                 (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
                 (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
                 new StubShellCommandTool(),
@@ -295,6 +369,158 @@ class SpringAiCodexAgentTest {
     }
 
     @Test
+    void handleTurnExecutesSafeReadOnlyActionsInParallelAndPreservesOrder() throws Exception {
+        CountDownLatch bothStarted = new CountDownLatch(2);
+        CountDownLatch readRelease = new CountDownLatch(1);
+        CountDownLatch listRelease = new CountDownLatch(1);
+        SpringAiCodexAgent agent = new SpringAiCodexAgent(
+                new NoOpChatClientBuilder(),
+                new BlockingFileReadTool(bothStarted, readRelease, "read complete"),
+                (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                new BlockingListDirTool(bothStarted, listRelease, "list complete"),
+                new NoOpWebSearchTool(),
+                (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
+                (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
+                new StubShellCommandTool(),
+                new NoOpCommandApprovalService(),
+                new NoOpAgentControl(),
+                new NoOpThreadContextReconstructionService(),
+                new RecordingContextManager(),
+                new NoOpSkillService(),
+                Path.of("/tmp/workspace"),
+                codexProperties(8, 2, 0, 0));
+
+        SpringAiCodexAgent.PlannerStep step = agent.parseDecision("""
+                {
+                  "summary": "Read two things",
+                  "actions": [
+                    {"action": "READ_FILE", "path": "README.md"},
+                    {"action": "LIST_DIR", "path": "src", "maxDepth": 1}
+                  ]
+                }
+                """);
+        List<org.dean.codex.protocol.item.TurnItem> items = new ArrayList<>();
+        CompletableFuture<SpringAiCodexAgent.BatchExecutionOutcome> future = CompletableFuture.supplyAsync(() ->
+                agent.executeActions(new ThreadId("thread-parallel"), new TurnId("turn-parallel"), step.actions(), items, null));
+
+        assertTrue(bothStarted.await(1, TimeUnit.SECONDS));
+        listRelease.countDown();
+        TimeUnit.MILLISECONDS.sleep(100L);
+        readRelease.countDown();
+
+        var outcome = future.get(2, TimeUnit.SECONDS);
+        assertFalse(outcome.awaitingApproval());
+        List<Object> toolItems = items.stream()
+                .filter(item -> item instanceof ToolCallItem || item instanceof ToolResultItem)
+                .map(item -> (Object) item)
+                .toList();
+        assertEquals(4, toolItems.size());
+        assertInstanceOf(ToolCallItem.class, toolItems.get(0));
+        assertInstanceOf(ToolResultItem.class, toolItems.get(1));
+        assertInstanceOf(ToolCallItem.class, toolItems.get(2));
+        assertInstanceOf(ToolResultItem.class, toolItems.get(3));
+        assertEquals("READ_FILE", ((ToolCallItem) toolItems.get(0)).toolName());
+        assertEquals("LIST_DIR", ((ToolCallItem) toolItems.get(2)).toolName());
+    }
+
+    @Test
+    void handleTurnKeepsSequentialBarriersBetweenParallelWaves() throws Exception {
+        CountDownLatch patchStarted = new CountDownLatch(1);
+        CountDownLatch patchRelease = new CountDownLatch(1);
+        CountDownLatch listStarted = new CountDownLatch(1);
+        SpringAiCodexAgent agent = new SpringAiCodexAgent(
+                new NoOpChatClientBuilder(),
+                path -> new FileReadResult(true, path, "", false, 0, "read"),
+                (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                new NoOpListDirTool(),
+                new NoOpWebSearchTool(),
+                new BlockingPatchTool(patchStarted, patchRelease, "patched"),
+                (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
+                new StubShellCommandTool(),
+                new NoOpCommandApprovalService(),
+                new NoOpAgentControl(),
+                new NoOpThreadContextReconstructionService(),
+                new RecordingContextManager(),
+                new NoOpSkillService(),
+                Path.of("/tmp/workspace"),
+                codexProperties(8, 2, 0, 0));
+
+        SpringAiCodexAgent.PlannerStep step = agent.parseDecision("""
+                {
+                  "summary": "Mixed wave",
+                  "actions": [
+                    {"action": "READ_FILE", "path": "README.md"},
+                    {"action": "APPLY_PATCH", "path": "README.md", "oldText": "old", "newText": "new"},
+                    {"action": "LIST_DIR", "path": "src", "maxDepth": 1}
+                  ]
+                }
+                """);
+        List<org.dean.codex.protocol.item.TurnItem> items = new ArrayList<>();
+        CompletableFuture<SpringAiCodexAgent.BatchExecutionOutcome> future = CompletableFuture.supplyAsync(() ->
+                agent.executeActions(new ThreadId("thread-barrier"), new TurnId("turn-barrier"), step.actions(), items, null));
+
+        assertTrue(patchStarted.await(1, TimeUnit.SECONDS));
+        assertFalse(listStarted.await(200, TimeUnit.MILLISECONDS));
+        patchRelease.countDown();
+
+        var outcome = future.get(2, TimeUnit.SECONDS);
+        assertFalse(outcome.awaitingApproval());
+        List<Object> toolItems = items.stream()
+                .filter(item -> item instanceof ToolCallItem || item instanceof ToolResultItem)
+                .map(item -> (Object) item)
+                .toList();
+        assertEquals(6, toolItems.size());
+        assertEquals("READ_FILE", ((ToolCallItem) toolItems.get(0)).toolName());
+        assertEquals("APPLY_PATCH", ((ToolCallItem) toolItems.get(2)).toolName());
+        assertEquals("LIST_DIR", ((ToolCallItem) toolItems.get(4)).toolName());
+    }
+
+    @Test
+    void executeActionsReducesBatchObservationBeforeScratchpadAppend() throws Exception {
+        SpringAiCodexAgent agent = new SpringAiCodexAgent(
+                new NoOpChatClientBuilder(),
+                path -> new FileReadResult(true, path, "x".repeat(2000), false, 2000, ""),
+                (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                new NoOpListDirTool(),
+                new NoOpWebSearchTool(),
+                (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
+                (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
+                new StubShellCommandTool(),
+                new NoOpCommandApprovalService(),
+                new NoOpAgentControl(),
+                new NoOpThreadContextReconstructionService(),
+                new NoOpContextManager(),
+                new NoOpSkillService(),
+                Path.of("/tmp/workspace"),
+                defaultModelProperties());
+
+        SpringAiCodexAgent.PlannerStep step = agent.parseDecision("""
+                {
+                  "summary": "Reduce live observations",
+                  "actions": [
+                    {"action": "READ_FILE", "path": "README.md"},
+                    {"action": "RUN_COMMAND", "command": "echo big"}
+                  ]
+                }
+                """);
+        List<org.dean.codex.protocol.item.TurnItem> items = new ArrayList<>();
+        SpringAiCodexAgent.BatchExecutionOutcome outcome = agent.executeActions(
+                new ThreadId("thread-reduction"),
+                new TurnId("turn-reduction"),
+                step.actions(),
+                items,
+                null);
+
+        JsonNode batch = new ObjectMapper().readTree(outcome.observation());
+        JsonNode readResult = batch.path("results").get(0).path("result");
+        JsonNode commandResult = batch.path("results").get(1).path("result");
+        assertTrue(readResult.has("contentExcerpt"));
+        assertFalse(readResult.has("content"));
+        assertTrue(commandResult.has("stdoutPreview"));
+        assertFalse(commandResult.has("stdout"));
+    }
+
+    @Test
     void handleTurnReturnsStructuredResult() {
         ThreadId threadId = new ThreadId("thread-1");
         TurnId turnId = new TurnId("turn-1");
@@ -328,6 +554,8 @@ class SpringAiCodexAgentTest {
                 new NoOpChatClientBuilder(),
                 path -> new FileReadResult(true, path, "", false, 0, ""),
                 (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                (path, maxDepth) -> new ListDirResult(true, path, maxDepth == null ? 1 : maxDepth, List.of(), 0, false, ""),
+                new NoOpWebSearchTool(),
                 (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
                 (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
                 new StubShellCommandTool(),
@@ -382,6 +610,8 @@ class SpringAiCodexAgentTest {
                 new NoOpChatClientBuilder(),
                 path -> new FileReadResult(true, path, "", false, 0, ""),
                 (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                new NoOpListDirTool(),
+                new NoOpWebSearchTool(),
                 (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
                 (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
                 new StubShellCommandTool(),
@@ -391,7 +621,7 @@ class SpringAiCodexAgentTest {
                 contextManager,
                 new NoOpSkillService(),
                 Path.of("/tmp/workspace"),
-                codexProperties(6, 2, 2200, 0),
+                codexProperties(6, 2, 3500, 0),
                 List.of("""
                         {
                           "summary": "All done",
@@ -413,6 +643,8 @@ class SpringAiCodexAgentTest {
                 new NoOpChatClientBuilder(),
                 path -> new FileReadResult(true, path, "", false, 0, ""),
                 (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                new NoOpListDirTool(),
+                new NoOpWebSearchTool(),
                 (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
                 (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
                 new StubShellCommandTool(),
@@ -422,7 +654,7 @@ class SpringAiCodexAgentTest {
                 contextManager,
                 new NoOpSkillService(),
                 Path.of("/tmp/workspace"),
-                codexProperties(6, 2, 2200, 0),
+                codexProperties(6, 2, 3000, 0),
                 List.of("""
                         {
                           "summary": "Done",
@@ -445,6 +677,8 @@ class SpringAiCodexAgentTest {
                 new NoOpChatClientBuilder(),
                 path -> new FileReadResult(true, path, "", false, 0, ""),
                 (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                new NoOpListDirTool(),
+                new NoOpWebSearchTool(),
                 (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
                 (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
                 new StubShellCommandTool(planningState),
@@ -454,7 +688,7 @@ class SpringAiCodexAgentTest {
                 contextManager,
                 new NoOpSkillService(),
                 Path.of("/tmp/workspace"),
-                codexProperties(6, 2, 2200, 0),
+                codexProperties(6, 2, 3500, 0),
                 List.of("""
                         {
                           "summary": "Run the command",
@@ -494,6 +728,8 @@ class SpringAiCodexAgentTest {
                 new NoOpChatClientBuilder(),
                 path -> new FileReadResult(true, path, "", false, 0, ""),
                 (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                new NoOpListDirTool(),
+                new NoOpWebSearchTool(),
                 (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
                 (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
                 new StubShellCommandTool(planningState),
@@ -533,6 +769,8 @@ class SpringAiCodexAgentTest {
                 new NoOpChatClientBuilder(),
                 path -> new FileReadResult(true, path, "", false, 0, ""),
                 (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                new NoOpListDirTool(),
+                new NoOpWebSearchTool(),
                 (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
                 (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
                 new StubShellCommandTool(),
@@ -659,6 +897,162 @@ class SpringAiCodexAgentTest {
                 || collab.status() == CollabToolCallStatus.FAILED)));
         assertTrue(result.items().stream().anyMatch(item -> item instanceof CollabToolCallItem collab
                 && "mailbox_updated".equals(collab.wakeupCause())));
+    }
+
+    @Test
+    void handleTurnRoutesUnifiedExecActionsThroughExecCommandTool() {
+        RecordingExecCommandTool execCommandTool = new RecordingExecCommandTool();
+        SpringAiCodexAgent agent = new ScriptedSpringAiCodexAgent(
+                new NoOpChatClientBuilder(),
+                path -> new FileReadResult(true, path, "", false, 0, ""),
+                (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                new NoOpListDirTool(),
+                new NoOpWebSearchTool(),
+                (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
+                (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
+                new StubShellCommandTool(),
+                execCommandTool,
+                new NoOpCommandApprovalService(),
+                new NoOpAgentControl(),
+                new NoOpThreadContextReconstructionService(),
+                new RecordingContextManager(),
+                new NoOpSkillService(),
+                Path.of("/tmp/workspace"),
+                codexProperties(6, 2, 0, 0),
+                List.of("""
+                        {
+                          "summary": "Start a command",
+                          "actions": [
+                            {
+                              "action": "exec_command",
+                              "command": "npm test",
+                              "yieldTimeMillis": 1000,
+                              "maxRuntimeMillis": 60000
+                            }
+                          ]
+                        }
+                        """,
+                        """
+                        {
+                          "summary": "Poll the command",
+                          "actions": [
+                            {
+                              "action": "write_stdin",
+                              "sessionId": "exec-session-1",
+                              "input": "",
+                              "yieldTimeMillis": 250
+                            }
+                          ]
+                        }
+                        """,
+                        """
+                        {
+                          "summary": "Done",
+                          "finalAnswer": "Finished"
+                        }
+                        """),
+                List.of(0, 0, 0));
+
+        ThreadId threadId = new ThreadId("thread-parent");
+        var result = agent.handleTurn(threadId, new TurnId("turn-1"), "run long command");
+
+        assertEquals(TurnStatus.COMPLETED, result.status());
+        assertEquals(threadId, execCommandTool.execThreadId);
+        assertEquals("npm test", execCommandTool.execCommand);
+        assertEquals(Long.valueOf(1000), execCommandTool.execYieldTimeMillis);
+        assertEquals(Long.valueOf(60000), execCommandTool.execMaxRuntimeMillis);
+        assertEquals(threadId, execCommandTool.writeThreadId);
+        assertEquals("exec-session-1", execCommandTool.writeSessionId);
+        assertEquals("", execCommandTool.writeInput);
+        assertEquals(Long.valueOf(250), execCommandTool.writeYieldTimeMillis);
+        assertTrue(result.items().stream().anyMatch(item -> item instanceof ToolResultItem toolResult
+                && toolResult.summary().contains("sessionId=exec-session-1")));
+    }
+
+    @Test
+    void handleTurnCarriesRunningExecSessionsIntoFollowUpPlannerSteps() {
+        RecordingExecCommandTool execCommandTool = new RecordingExecCommandTool();
+        List<Integer> activeSessionCounts = new ArrayList<>();
+        SpringAiCodexAgent agent = new ScriptedSpringAiCodexAgent(
+                new NoOpChatClientBuilder(),
+                path -> new FileReadResult(true, path, "", false, 0, ""),
+                (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                new NoOpListDirTool(),
+                new NoOpWebSearchTool(),
+                (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
+                (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
+                new StubShellCommandTool(),
+                execCommandTool,
+                new NoOpCommandApprovalService(),
+                new NoOpAgentControl(),
+                new NoOpThreadContextReconstructionService(),
+                new RecordingContextManager(),
+                new NoOpSkillService(),
+                Path.of("/tmp/workspace"),
+                codexProperties(6, 2, 0, 0),
+                List.of("""
+                        {
+                          "summary": "Start a command",
+                          "actions": [
+                            {
+                              "action": "exec_command",
+                              "command": "npm test",
+                              "yieldTimeMillis": 1000,
+                              "maxRuntimeMillis": 60000
+                            }
+                          ]
+                        }
+                        """,
+                        """
+                        {
+                          "summary": "Poll the command",
+                          "actions": [
+                            {
+                              "action": "write_stdin",
+                              "sessionId": "exec-session-1",
+                              "input": "",
+                              "yieldTimeMillis": 250
+                            }
+                          ]
+                        }
+                        """,
+                        """
+                        {
+                          "summary": "Done",
+                          "finalAnswer": "Finished"
+                        }
+                        """),
+                List.of(0, 0, 0)) {
+            @Override
+            protected PlannerStep requestDecision(ThreadId threadId,
+                                                  TurnId turnId,
+                                                  String input,
+                                                  String scratchpad,
+                                                  int step,
+                                                  List<ResolvedSkill> selectedSkills,
+                                                  List<SkillMetadata> availableSkills,
+                                                  List<String> steeringInputs) {
+                activeSessionCounts.add(currentExecSessionsForPrompt().size());
+                if (step == 2) {
+                    assertEquals(1, currentExecSessionsForPrompt().size());
+                    var session = currentExecSessionsForPrompt().get(0);
+                    assertEquals("exec-session-1", session.sessionId());
+                    assertEquals("RUNNING", session.status());
+                    assertEquals("npm test", session.command());
+                    assertEquals(0, session.pollCount());
+                    assertEquals("first chunk", session.stdoutPreview());
+                }
+                if (step == 3) {
+                    assertTrue(currentExecSessionsForPrompt().isEmpty());
+                }
+                return super.requestDecision(threadId, turnId, input, scratchpad, step, selectedSkills, availableSkills, steeringInputs);
+            }
+        };
+
+        var result = agent.handleTurn(new ThreadId("thread-parent"), new TurnId("turn-1"), "run long command");
+
+        assertEquals(TurnStatus.COMPLETED, result.status());
+        assertEquals(List.of(0, 1, 0), activeSessionCounts);
     }
 
     private static final class NoOpChatClientBuilder implements ChatClient.Builder {
@@ -857,6 +1251,167 @@ class SpringAiCodexAgentTest {
         }
     }
 
+    private static final class NoOpExecCommandTool implements ExecCommandTool {
+
+        @Override
+        public ExecCommandResult execCommand(ThreadId threadId, String command, Long yieldTimeMillis, Long maxRuntimeMillis, boolean pty) {
+            return new ExecCommandResult(true, "exec-session-1", command, "/tmp/workspace", 12345L, "RUNNING", null, pty, "", "", true,
+                    CommandApprovalDecision.ALLOW, "Allowed", "");
+        }
+
+        @Override
+        public ExecCommandResult writeStdin(ThreadId threadId, String sessionId, String input, Long yieldTimeMillis) {
+            return new ExecCommandResult(true, sessionId, "command", "/tmp/workspace", 12345L, "COMPLETED", 0, false, "", "", true,
+                    CommandApprovalDecision.ALLOW, "Allowed", "");
+        }
+    }
+
+    private static final class NoOpListDirTool implements ListDirTool {
+
+        @Override
+        public ListDirResult listDir(String path, Integer maxDepth) {
+            return new ListDirResult(true, path, maxDepth == null ? 1 : maxDepth, List.of(), 0, false, "");
+        }
+    }
+
+    private static final class BlockingFileReadTool implements org.dean.codex.core.tool.local.FileReaderTool {
+
+        private final CountDownLatch startedLatch;
+        private final CountDownLatch releaseLatch;
+        private final String content;
+
+        private BlockingFileReadTool(CountDownLatch startedLatch, CountDownLatch releaseLatch, String content) {
+            this.startedLatch = startedLatch;
+            this.releaseLatch = releaseLatch;
+            this.content = content;
+        }
+
+        @Override
+        public FileReadResult readFile(String path) {
+            startedLatch.countDown();
+            awaitRelease();
+            return new FileReadResult(true, path, content, false, content.length(), "");
+        }
+
+        private void awaitRelease() {
+            try {
+                if (!releaseLatch.await(2, TimeUnit.SECONDS)) {
+                    throw new AssertionError("Timed out waiting for read release");
+                }
+            }
+            catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError(exception);
+            }
+        }
+    }
+
+    private static final class BlockingListDirTool implements ListDirTool {
+
+        private final CountDownLatch startedLatch;
+        private final CountDownLatch releaseLatch;
+        private final String summary;
+
+        private BlockingListDirTool(CountDownLatch startedLatch, CountDownLatch releaseLatch, String summary) {
+            this.startedLatch = startedLatch;
+            this.releaseLatch = releaseLatch;
+            this.summary = summary;
+        }
+
+        @Override
+        public ListDirResult listDir(String path, Integer maxDepth) {
+            startedLatch.countDown();
+            awaitRelease();
+            return new ListDirResult(true, path, maxDepth == null ? 1 : maxDepth, List.of(), 0, false, summary);
+        }
+
+        private void awaitRelease() {
+            try {
+                if (!releaseLatch.await(2, TimeUnit.SECONDS)) {
+                    throw new AssertionError("Timed out waiting for list release");
+                }
+            }
+            catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError(exception);
+            }
+        }
+    }
+
+    private static final class BlockingPatchTool implements org.dean.codex.core.tool.local.FilePatchTool {
+
+        private final CountDownLatch startedLatch;
+        private final CountDownLatch releaseLatch;
+        private final String summary;
+
+        private BlockingPatchTool(CountDownLatch startedLatch, CountDownLatch releaseLatch, String summary) {
+            this.startedLatch = startedLatch;
+            this.releaseLatch = releaseLatch;
+            this.summary = summary;
+        }
+
+        @Override
+        public FilePatchResult applyPatch(String path, String oldText, String newText, boolean replaceAll) {
+            startedLatch.countDown();
+            awaitRelease();
+            return new FilePatchResult(true, path, 1, 0, summary);
+        }
+
+        private void awaitRelease() {
+            try {
+                if (!releaseLatch.await(2, TimeUnit.SECONDS)) {
+                    throw new AssertionError("Timed out waiting for patch release");
+                }
+            }
+            catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError(exception);
+            }
+        }
+    }
+
+    private static final class NoOpWebSearchTool implements WebSearchTool {
+
+        @Override
+        public WebSearchResult search(String query, Integer maxResults) {
+            return new WebSearchResult(true, query, "noop", List.of(), 0, false, "");
+        }
+    }
+
+    private static final class RecordingExecCommandTool implements ExecCommandTool {
+
+        private ThreadId execThreadId;
+        private String execCommand;
+        private Long execYieldTimeMillis;
+        private Long execMaxRuntimeMillis;
+        private boolean execPty;
+        private ThreadId writeThreadId;
+        private String writeSessionId;
+        private String writeInput;
+        private Long writeYieldTimeMillis;
+
+        @Override
+        public ExecCommandResult execCommand(ThreadId threadId, String command, Long yieldTimeMillis, Long maxRuntimeMillis, boolean pty) {
+            this.execThreadId = threadId;
+            this.execCommand = command;
+            this.execYieldTimeMillis = yieldTimeMillis;
+            this.execMaxRuntimeMillis = maxRuntimeMillis;
+            this.execPty = pty;
+            return new ExecCommandResult(true, "exec-session-1", command, "/tmp/workspace", 12345L, "RUNNING", null, pty,
+                    "first chunk", "", true, CommandApprovalDecision.ALLOW, "Allowed", "");
+        }
+
+        @Override
+        public ExecCommandResult writeStdin(ThreadId threadId, String sessionId, String input, Long yieldTimeMillis) {
+            this.writeThreadId = threadId;
+            this.writeSessionId = sessionId;
+            this.writeInput = input;
+            this.writeYieldTimeMillis = yieldTimeMillis;
+            return new ExecCommandResult(true, sessionId, "npm test", "/tmp/workspace", 12345L, "COMPLETED", 0, false,
+                    "second chunk", "", true, CommandApprovalDecision.ALLOW, "Allowed", "");
+        }
+    }
+
     private static final class NoOpSkillService implements SkillService {
 
         @Override
@@ -1035,7 +1590,7 @@ class SpringAiCodexAgentTest {
         }
     }
 
-    private static final class ScriptedSpringAiCodexAgent extends SpringAiCodexAgent {
+    private static class ScriptedSpringAiCodexAgent extends SpringAiCodexAgent {
 
         private final Deque<String> responses;
         private final List<Integer> expectedCompactionsAtDecision;
@@ -1045,6 +1600,8 @@ class SpringAiCodexAgentTest {
         private ScriptedSpringAiCodexAgent(ChatClient.Builder chatClientBuilder,
                                            org.dean.codex.core.tool.local.FileReaderTool fileReaderTool,
                                            org.dean.codex.core.tool.local.FileSearchTool fileSearchTool,
+                                           ListDirTool listDirTool,
+                                           WebSearchTool webSearchTool,
                                            org.dean.codex.core.tool.local.FilePatchTool filePatchTool,
                                            org.dean.codex.core.tool.local.FileWriterTool fileWriterTool,
                                            ShellCommandTool shellCommandTool,
@@ -1057,12 +1614,53 @@ class SpringAiCodexAgentTest {
                                            CodexProperties codexProperties,
                                            List<String> responses,
                                            List<Integer> expectedCompactionsAtDecision) {
-            super(chatClientBuilder,
+            this(chatClientBuilder,
                     fileReaderTool,
                     fileSearchTool,
+                    listDirTool,
+                    webSearchTool,
                     filePatchTool,
                     fileWriterTool,
                     shellCommandTool,
+                    new NoOpExecCommandTool(),
+                    commandApprovalService,
+                    agentControl,
+                    threadContextReconstructionService,
+                    contextManager,
+                    skillService,
+                    workspaceRoot,
+                    codexProperties,
+                    responses,
+                    expectedCompactionsAtDecision);
+        }
+
+        private ScriptedSpringAiCodexAgent(ChatClient.Builder chatClientBuilder,
+                                           org.dean.codex.core.tool.local.FileReaderTool fileReaderTool,
+                                           org.dean.codex.core.tool.local.FileSearchTool fileSearchTool,
+                                           ListDirTool listDirTool,
+                                           WebSearchTool webSearchTool,
+                                           org.dean.codex.core.tool.local.FilePatchTool filePatchTool,
+                                           org.dean.codex.core.tool.local.FileWriterTool fileWriterTool,
+                                           ShellCommandTool shellCommandTool,
+                                           ExecCommandTool execCommandTool,
+                                           CommandApprovalService commandApprovalService,
+                                           AgentControl agentControl,
+                                           ThreadContextReconstructionService threadContextReconstructionService,
+                                           RecordingContextManager contextManager,
+                                           SkillService skillService,
+                                           Path workspaceRoot,
+                                           CodexProperties codexProperties,
+                                           List<String> responses,
+                                           List<Integer> expectedCompactionsAtDecision) {
+            super(chatClientBuilder,
+                    fileReaderTool,
+                    fileSearchTool,
+                    listDirTool,
+                    webSearchTool,
+                    filePatchTool,
+                    fileWriterTool,
+                    shellCommandTool,
+                    execCommandTool,
                     commandApprovalService,
                     agentControl,
                     threadContextReconstructionService,

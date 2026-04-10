@@ -10,6 +10,8 @@ import org.dean.codex.protocol.history.HistoryMessageItem;
 import org.dean.codex.protocol.history.HistoryToolCallItem;
 import org.dean.codex.protocol.history.HistoryToolResultItem;
 import org.dean.codex.protocol.history.ThreadHistoryItem;
+import org.dean.codex.protocol.item.ToolCallItem;
+import org.dean.codex.protocol.item.ToolResultItem;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -97,5 +99,24 @@ class FileSystemThreadHistoryStoreTest {
         assertTrue(restored.get(0) instanceof CompactedHistoryItem);
         assertEquals("current", ((HistoryMessageItem) restored.get(1)).text());
         assertThrows(IllegalArgumentException.class, () -> restartedStore.read(new ThreadId("missing")));
+    }
+
+    @Test
+    void storesToolResultHistoryAsCompactSummariesOnly() {
+        ConversationStore conversationStore = new FileSystemConversationStore(tempDir);
+        ThreadId threadId = conversationStore.createThread("Summary-only history thread");
+        FileSystemThreadHistoryStore store = new FileSystemThreadHistoryStore(conversationStore, tempDir);
+        TurnId turnId = new TurnId("turn-1");
+        String hugeObservation = "x".repeat(5000);
+
+        store.append(threadId, ThreadHistoryMapper.map(turnId, List.of(
+                new ToolCallItem(new org.dean.codex.protocol.conversation.ItemId("item-1"), "READ_FILE", "README.md", Instant.parse("2026-03-31T00:00:00Z")),
+                new ToolResultItem(new org.dean.codex.protocol.conversation.ItemId("item-2"), "READ_FILE", hugeObservation, Instant.parse("2026-03-31T00:00:01Z")))));
+
+        List<ThreadHistoryItem> restored = store.read(threadId);
+        HistoryToolResultItem restoredResult = (HistoryToolResultItem) restored.get(1);
+        assertTrue(restoredResult.summary().length() <= 512);
+        assertTrue(restoredResult.summary().endsWith("..."));
+        assertEquals("READ_FILE", restoredResult.toolName());
     }
 }

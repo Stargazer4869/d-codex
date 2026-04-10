@@ -8,6 +8,7 @@ import org.dean.codex.core.conversation.ConversationStore;
 import org.dean.codex.core.history.ThreadHistoryStore;
 import org.dean.codex.core.skill.SkillService;
 import org.dean.codex.core.tool.local.CommandApprovalPolicy;
+import org.dean.codex.core.tool.local.WebSearchBackend;
 import org.dean.codex.core.tool.local.ShellCommandTool;
 import org.dean.codex.runtime.springai.approval.DefaultCommandApprovalService;
 import org.dean.codex.runtime.springai.context.DefaultThreadContextReconstructionService;
@@ -32,8 +33,10 @@ import org.dean.codex.runtime.springai.prompt.ThreadPromptSnapshotResolver;
 import org.dean.codex.runtime.springai.prompt.ThreadPromptStateStore;
 import org.dean.codex.runtime.springai.prompt.ToolContractPromptRenderer;
 import org.dean.codex.runtime.springai.prompt.ToolContractResolver;
+import org.dean.codex.runtime.springai.prompt.ToolCapabilityRegistry;
 import org.dean.codex.runtime.springai.prompt.UserInstructionsResolver;
 import org.dean.codex.runtime.springai.skills.FileSystemSkillService;
+import org.dean.codex.tools.local.DuckDuckGoHtmlWebSearchBackend;
 import org.dean.codex.tools.local.PatternCommandApprovalPolicy;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -41,6 +44,8 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.ai.chat.client.ChatClient;
 
 import java.nio.file.Path;
+import java.net.URI;
+import java.net.http.HttpClient;
 import java.time.Duration;
 
 @Configuration
@@ -148,8 +153,8 @@ public class CodexRuntimeSpringAiConfig {
     }
 
     @Bean
-    public ToolContractResolver toolContractResolver() {
-        return new DefaultToolContractResolver();
+    public ToolContractResolver toolContractResolver(ToolCapabilityRegistry toolCapabilityRegistry) {
+        return new DefaultToolContractResolver(toolCapabilityRegistry);
     }
 
     @Bean
@@ -214,6 +219,13 @@ public class CodexRuntimeSpringAiConfig {
     public CommandApprovalPolicy commandApprovalPolicy(CodexProperties properties) {
         return new PatternCommandApprovalPolicy(
                 PatternCommandApprovalPolicy.Mode.from(properties.getShell().getApprovalMode()));
+    }
+
+    @Bean
+    public WebSearchBackend webSearchBackend() {
+        return new DuckDuckGoHtmlWebSearchBackend(
+                HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL).build(),
+                URI.create("https://html.duckduckgo.com/html/"));
     }
 
     @Bean("codexCommandTimeout")

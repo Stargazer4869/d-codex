@@ -41,6 +41,28 @@ class ThreadLifecycleJsonTest {
         ThreadReadParams readParams = new ThreadReadParams(new ThreadId("thread-1"), true);
         assertEquals(readParams, objectMapper.readValue(objectMapper.writeValueAsString(readParams), ThreadReadParams.class));
 
+        CommandExecParams commandExecParams = new CommandExecParams(
+                new ThreadId("thread-1"),
+                "printf 'hello'",
+                "/Users/chenzhu/Git/play-with-ai",
+                1_000L,
+                10_000L,
+                Boolean.TRUE);
+        assertEquals(commandExecParams, objectMapper.readValue(objectMapper.writeValueAsString(commandExecParams), CommandExecParams.class));
+
+        CommandExecWriteParams commandExecWriteParams = new CommandExecWriteParams(
+                new ThreadId("thread-1"),
+                "session-1",
+                "\n",
+                250L);
+        assertEquals(commandExecWriteParams, objectMapper.readValue(objectMapper.writeValueAsString(commandExecWriteParams), CommandExecWriteParams.class));
+
+        CommandExecResizeParams commandExecResizeParams = new CommandExecResizeParams(new ThreadId("thread-1"), "session-1", 120, 40);
+        assertEquals(commandExecResizeParams, objectMapper.readValue(objectMapper.writeValueAsString(commandExecResizeParams), CommandExecResizeParams.class));
+
+        CommandExecTerminateParams commandExecTerminateParams = new CommandExecTerminateParams(new ThreadId("thread-1"), "session-1");
+        assertEquals(commandExecTerminateParams, objectMapper.readValue(objectMapper.writeValueAsString(commandExecTerminateParams), CommandExecTerminateParams.class));
+
         ThreadStartParams startParams = new ThreadStartParams("App thread", "workspace-write", "review-sensitive");
         assertEquals(startParams, objectMapper.readValue(objectMapper.writeValueAsString(startParams), ThreadStartParams.class));
 
@@ -127,6 +149,37 @@ class ThreadLifecycleJsonTest {
                         "/workspace/thread-1",
                         Instant.parse("2026-04-01T00:00:08Z"))));
         assertEquals(resumeResponse, objectMapper.readValue(objectMapper.writeValueAsString(resumeResponse), ThreadResumeResponse.class));
+
+        CommandExecutionEvent commandExecutionEvent = new CommandExecutionEvent(
+                "session-1",
+                new ThreadId("thread-1"),
+                "printf 'hello'",
+                "/Users/chenzhu/Git/play-with-ai",
+                12345L,
+                "RUNNING",
+                Instant.parse("2026-04-01T00:00:03Z"),
+                null,
+                null);
+        CommandExecResponse commandExecResponse = new CommandExecResponse(commandExecutionEvent, "hello", "", "");
+        assertEquals(commandExecResponse, objectMapper.readValue(objectMapper.writeValueAsString(commandExecResponse), CommandExecResponse.class));
+
+        CommandExecResizeResponse commandExecResizeResponse = new CommandExecResizeResponse(commandExecutionEvent, false);
+        assertEquals(commandExecResizeResponse, objectMapper.readValue(objectMapper.writeValueAsString(commandExecResizeResponse), CommandExecResizeResponse.class));
+
+        CommandExecTerminateResponse commandExecTerminateResponse = new CommandExecTerminateResponse(commandExecutionEvent, true);
+        assertEquals(commandExecTerminateResponse, objectMapper.readValue(objectMapper.writeValueAsString(commandExecTerminateResponse), CommandExecTerminateResponse.class));
+
+        CommandExecutionTerminalInteractionNotification terminalInteractionNotification =
+                new CommandExecutionTerminalInteractionNotification(
+                        commandExecutionEvent,
+                        "resize",
+                        null,
+                        120,
+                        40);
+        assertEquals(terminalInteractionNotification,
+                objectMapper.readValue(
+                        objectMapper.writeValueAsString(terminalInteractionNotification),
+                        CommandExecutionTerminalInteractionNotification.class));
 
         ThreadListResponse listResponse = new ThreadListResponse(
                 List.of(new ThreadSummary(
