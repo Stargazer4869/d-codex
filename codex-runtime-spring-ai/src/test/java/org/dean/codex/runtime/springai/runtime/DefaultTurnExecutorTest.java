@@ -2,6 +2,10 @@ package org.dean.codex.runtime.springai.runtime;
 
 import org.dean.codex.core.agent.CodexAgent;
 import org.dean.codex.core.agent.TurnControl;
+import org.dean.codex.core.model.InputImageItem;
+import org.dean.codex.core.model.InputTextItem;
+import org.dean.codex.core.model.ModelInputItem;
+import org.dean.codex.core.model.ModelInputRole;
 import org.dean.codex.core.conversation.ConversationStore;
 import org.dean.codex.core.conversation.InMemoryConversationStore;
 import org.dean.codex.protocol.conversation.ItemId;
@@ -10,8 +14,10 @@ import org.dean.codex.protocol.conversation.TurnId;
 import org.dean.codex.protocol.conversation.TurnStatus;
 import org.dean.codex.protocol.event.CodexTurnResult;
 import org.dean.codex.protocol.history.HistoryApprovalItem;
+import org.dean.codex.protocol.history.HistoryImageItem;
 import org.dean.codex.protocol.history.HistoryMessageItem;
 import org.dean.codex.protocol.history.HistoryPlanItem;
+import org.dean.codex.protocol.history.HistoryReasoningItem;
 import org.dean.codex.protocol.history.HistorySkillUseItem;
 import org.dean.codex.protocol.history.HistoryToolCallItem;
 import org.dean.codex.protocol.history.HistoryToolResultItem;
@@ -20,10 +26,13 @@ import org.dean.codex.protocol.item.AgentMessageItem;
 import org.dean.codex.protocol.item.ApprovalItem;
 import org.dean.codex.protocol.item.ApprovalState;
 import org.dean.codex.protocol.item.PlanItem;
+import org.dean.codex.protocol.item.RawModelOutputItem;
+import org.dean.codex.protocol.item.ReasoningItem;
 import org.dean.codex.protocol.item.SkillUseItem;
 import org.dean.codex.protocol.item.ToolCallItem;
 import org.dean.codex.protocol.item.ToolResultItem;
 import org.dean.codex.protocol.item.TurnItem;
+import org.dean.codex.protocol.item.UserImageItem;
 import org.dean.codex.protocol.item.UserMessageItem;
 import org.dean.codex.protocol.planning.EditPlan;
 import org.dean.codex.protocol.planning.PlannedEdit;
@@ -125,6 +134,66 @@ class DefaultTurnExecutorTest {
         assertInstanceOf(HistoryMessageItem.class, historyStore.read(threadId).get(0));
     }
 
+    @Test
+    void recordsReasoningItemsIntoCanonicalHistory() {
+        ConversationStore conversationStore = new InMemoryConversationStore();
+        InMemoryThreadHistoryStore historyStore = new InMemoryThreadHistoryStore();
+        ThreadId threadId = conversationStore.createThread("Executor thread");
+        DefaultTurnExecutor executor = new DefaultTurnExecutor(new ReasoningCodexAgent(), conversationStore, historyStore);
+
+        CodexTurnResult result = executor.executeTurn(threadId, "inspect build");
+
+        assertEquals(TurnStatus.COMPLETED, result.status());
+        List<ThreadHistoryItem> history = historyStore.read(threadId);
+        assertEquals(3, history.size());
+        assertInstanceOf(HistoryMessageItem.class, history.get(0));
+        assertInstanceOf(HistoryReasoningItem.class, history.get(1));
+        assertInstanceOf(HistoryMessageItem.class, history.get(2));
+        assertEquals("Need to inspect the build file", ((HistoryReasoningItem) history.get(1)).summary());
+    }
+
+    @Test
+    void recordsTypedImageInputsIntoTurnItemsAndCanonicalHistory() {
+        ConversationStore conversationStore = new InMemoryConversationStore();
+        InMemoryThreadHistoryStore historyStore = new InMemoryThreadHistoryStore();
+        ThreadId threadId = conversationStore.createThread("Executor thread");
+        DefaultTurnExecutor executor = new DefaultTurnExecutor(new RecordingCodexAgent(), conversationStore, historyStore);
+
+        List<ModelInputItem> inputItems = List.of(
+                new InputTextItem(ModelInputRole.USER, "Inspect this screenshot"),
+                new InputImageItem(ModelInputRole.USER, "file:///tmp/screenshot.png", "high"));
+
+        CodexTurnResult result = executor.executeTurn(threadId, "Inspect this screenshot", inputItems, item -> { }, new TurnControl() { });
+
+        assertEquals(TurnStatus.COMPLETED, result.status());
+        List<TurnItem> turnItems = conversationStore.turns(threadId).get(0).items();
+        assertInstanceOf(UserMessageItem.class, turnItems.get(0));
+        assertInstanceOf(UserImageItem.class, turnItems.get(1));
+        List<ThreadHistoryItem> history = historyStore.read(threadId);
+        assertInstanceOf(HistoryMessageItem.class, history.get(0));
+        assertInstanceOf(HistoryImageItem.class, history.get(1));
+        assertEquals("file:///tmp/screenshot.png", ((HistoryImageItem) history.get(1)).imageUrl());
+    }
+
+    @Test
+    void doesNotPersistRawModelOutputItemsIntoTurnsOrHistory() {
+        ConversationStore conversationStore = new InMemoryConversationStore();
+        InMemoryThreadHistoryStore historyStore = new InMemoryThreadHistoryStore();
+        ThreadId threadId = conversationStore.createThread("Executor thread");
+        DefaultTurnExecutor executor = new DefaultTurnExecutor(new RawModelCodexAgent(), conversationStore, historyStore);
+
+        CodexTurnResult result = executor.executeTurn(threadId, "inspect build");
+
+        assertEquals(TurnStatus.COMPLETED, result.status());
+        assertTrue(result.items().stream().anyMatch(RawModelOutputItem.class::isInstance));
+        List<TurnItem> persistedTurnItems = conversationStore.turns(threadId).get(0).items();
+        assertEquals(2, persistedTurnItems.size());
+        assertTrue(persistedTurnItems.stream().noneMatch(RawModelOutputItem.class::isInstance));
+        List<ThreadHistoryItem> history = historyStore.read(threadId);
+        assertEquals(2, history.size());
+        assertTrue(history.stream().allMatch(HistoryMessageItem.class::isInstance));
+    }
+
     private static final class RecordingCodexAgent implements CodexAgent {
 
         @Override
@@ -222,6 +291,77 @@ class DefaultTurnExecutorTest {
                 return new CodexTurnResult(threadId, turnId, TurnStatus.INTERRUPTED, List.of(), "Turn interrupted.");
             }
             return new CodexTurnResult(threadId, turnId, TurnStatus.COMPLETED, List.of(), "done");
+        }
+
+        @Override
+        public CodexTurnResult handleTurn(ThreadId threadId, TurnId turnId, String input) {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    private static final class ReasoningCodexAgent implements CodexAgent {
+
+        @Override
+        public CodexTurnResult handleTurn(ThreadId threadId,
+                                          TurnId turnId,
+                                          String input,
+                                          Consumer<TurnItem> eventConsumer) {
+            ReasoningItem reasoningItem = new ReasoningItem(
+                    new ItemId("reasoning-1"),
+                    "Need to inspect the build file",
+                    "The error likely comes from dependency configuration.",
+                    Instant.parse("2026-03-31T00:00:20Z"));
+            AgentMessageItem assistantMessageItem = new AgentMessageItem(
+                    new ItemId("assistant-1"),
+                    "done",
+                    Instant.parse("2026-03-31T00:00:21Z"));
+            eventConsumer.accept(reasoningItem);
+            eventConsumer.accept(assistantMessageItem);
+            return new CodexTurnResult(
+                    threadId,
+                    turnId,
+                    TurnStatus.COMPLETED,
+                    List.of(reasoningItem, assistantMessageItem),
+                    "done");
+        }
+
+        @Override
+        public CodexTurnResult handleTurn(ThreadId threadId, TurnId turnId, String input) {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    private static final class RawModelCodexAgent implements CodexAgent {
+
+        @Override
+        public CodexTurnResult handleTurn(ThreadId threadId,
+                                          TurnId turnId,
+                                          String input,
+                                          Consumer<TurnItem> eventConsumer) {
+            List<TurnItem> items = new ArrayList<>();
+            RawModelOutputItem rawItem = new RawModelOutputItem(
+                    new ItemId("raw-1"),
+                    "reasoning",
+                    "resp-item-1",
+                    "stream-1",
+                    1,
+                    threadId.value(),
+                    turnId.value(),
+                    1,
+                    "response-1",
+                    "session-1",
+                    "completed",
+                    "{\"id\":\"resp-item-1\",\"summary\":\"Need to inspect the build file\"}",
+                    Instant.parse("2026-03-31T00:00:02Z"));
+            AgentMessageItem assistantMessageItem = new AgentMessageItem(
+                    new ItemId("event-1"),
+                    "done",
+                    Instant.parse("2026-03-31T00:00:03Z"));
+            for (TurnItem item : List.of(rawItem, assistantMessageItem)) {
+                items.add(item);
+                eventConsumer.accept(item);
+            }
+            return new CodexTurnResult(threadId, turnId, TurnStatus.COMPLETED, items, "done");
         }
 
         @Override

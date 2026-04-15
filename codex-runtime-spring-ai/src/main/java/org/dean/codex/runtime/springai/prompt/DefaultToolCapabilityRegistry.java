@@ -15,6 +15,7 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                       "action": "READ_FILE",
                       "path": "relative/path/to/file"
                     }""",
+                    defaultOutputSchema("path", "content", "truncated", "sizeBytes"),
                     true,
                     List.of()),
             capability("SEARCH_FILES",
@@ -25,6 +26,7 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                       "query": "search query when searching",
                       "path": "optional scoped path"
                     }""",
+                    defaultOutputSchema("query", "scope", "matches", "matchCount"),
                     true,
                     List.of()),
             capability("LIST_DIR",
@@ -35,6 +37,7 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                       "path": "optional relative directory path",
                       "maxDepth": 1
                     }""",
+                    defaultOutputSchema("path", "items", "truncated", "itemCount"),
                     true,
                     List.of("Use LIST_DIR to discover directory structure before reading files.")),
             capability("WEB_SEARCH",
@@ -45,6 +48,7 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                       "query": "search query for external documentation or facts",
                       "maxResults": 5
                     }""",
+                    defaultOutputSchema("query", "results", "resultCount"),
                     true,
                     List.of("Use WEB_SEARCH for external documentation, ecosystem facts, or recent references when local workspace search is not enough.")),
             capability("APPLY_PATCH",
@@ -57,6 +61,7 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                       "newText": "replacement text when applying a patch",
                       "replaceAll": false
                     }""",
+                    defaultOutputSchema("path", "replacements", "message"),
                     false,
                     List.of("Prefer APPLY_PATCH for targeted edits over rewriting whole files.")),
             capability("WRITE_FILE",
@@ -67,6 +72,7 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                       "path": "relative/path/to/file",
                       "content": "file content when writing"
                     }""",
+                    defaultOutputSchema("path", "created", "bytesWritten", "message"),
                     false,
                     List.of("Use WRITE_FILE for new files or explicit full rewrites.")),
             capability("RUN_COMMAND",
@@ -76,6 +82,7 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                       "action": "RUN_COMMAND",
                       "command": "shell command when running one"
                     }""",
+                    defaultOutputSchema("command", "exitCode", "stdout", "stderr", "approved", "decision"),
                     false,
                     List.of("Avoid destructive shell commands.")),
             capability("exec_command",
@@ -88,6 +95,7 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                       "maxRuntimeMillis": 60000,
                       "pty": false
                     }""",
+                    defaultOutputSchema("command", "sessionId", "running", "exitCode", "stdout", "stderr", "timedOut"),
                     false,
                     List.of(
                             "Use exec_command when you may need to poll or continue observing the same command later.",
@@ -101,6 +109,7 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                       "input": "",
                       "yieldTimeMillis": 250
                     }""",
+                    defaultOutputSchema("sessionId", "running", "exitCode", "stdout", "stderr", "timedOut"),
                     false,
                     List.of("Use empty input with write_stdin to poll for additional output without sending new stdin.")),
             capability("spawn_agent",
@@ -117,6 +126,7 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                       "model": "optional model name",
                       "cwd": "optional child workspace cwd"
                     }""",
+                    defaultOutputSchema("threadId", "nickname", "role", "status"),
                     false,
                     List.of()),
             capability("send_message",
@@ -127,6 +137,7 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                       "threadId": "agent-thread-id",
                       "content": "message to queue for the agent"
                     }""",
+                    defaultOutputSchema("threadId", "status", "queued"),
                     false,
                     List.of()),
             capability("assign_task",
@@ -138,6 +149,7 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                       "content": "task to assign to the agent",
                       "interrupt": false
                     }""",
+                    defaultOutputSchema("threadId", "status", "queued", "interrupted"),
                     false,
                     List.of()),
             capability("send_input",
@@ -149,6 +161,7 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                       "content": "message to send to the agent",
                       "interrupt": false
                     }""",
+                    defaultOutputSchema("threadId", "status", "queued", "interrupted"),
                     false,
                     List.of()),
             capability("wait_agent",
@@ -159,6 +172,7 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                       "threadIds": ["agent-thread-id"],
                       "timeoutMillis": 1000
                     }""",
+                    defaultOutputSchema("threadIds", "timedOut", "results"),
                     false,
                     List.of()),
             capability("resume_agent",
@@ -168,6 +182,7 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                       "action": "resume_agent",
                       "threadId": "agent-thread-id"
                     }""",
+                    defaultOutputSchema("threadId", "status"),
                     false,
                     List.of()),
             capability("close_agent",
@@ -177,6 +192,7 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                       "action": "close_agent",
                       "threadId": "agent-thread-id"
                     }""",
+                    defaultOutputSchema("threadId", "status", "closedAt"),
                     false,
                     List.of()),
             capability("list_agents",
@@ -187,6 +203,7 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                       "threadId": "optional-parent-thread-id",
                       "recursive": true
                     }""",
+                    defaultOutputSchema("threadId", "recursive", "agents"),
                     false,
                     List.of()));
 
@@ -198,10 +215,70 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
     private static ToolCapability capability(String name,
                                              String description,
                                              String schema,
+                                             String outputSchema,
                                              boolean supportsParallelExecution,
                                              List<String> supplementaryInstructions) {
         return new ToolCapability(
-                new ResolvedToolDefinition(name, description, schema, supplementaryInstructions),
+                new ResolvedToolDefinition(
+                        name,
+                        description,
+                        schema,
+                        schema,
+                        outputSchema,
+                        supportsParallelExecution,
+                        supplementaryInstructions),
                 supportsParallelExecution);
+    }
+
+    private static String defaultOutputSchema(String... fields) {
+        String properties = java.util.Arrays.stream(fields)
+                .map(DefaultToolCapabilityRegistry::jsonProperty)
+                .collect(java.util.stream.Collectors.joining(",\n      "));
+        String required = java.util.Arrays.stream(fields)
+                .map(field -> "\"" + field + "\"")
+                .collect(java.util.stream.Collectors.joining(", "));
+        String extraProperties = properties.isBlank() ? "" : ",\n      " + properties;
+        String extraRequired = required.isBlank() ? "" : ", " + required;
+        return """
+                {
+                  "type": "object",
+                  "properties": {
+                    "success": {"type": "boolean"}%s
+                  },
+                  "required": ["success"%s],
+                  "additionalProperties": true
+                }""".formatted(extraProperties, extraRequired);
+    }
+
+    private static String jsonProperty(String field) {
+        String type = inferredJsonType(field);
+        return "\"%s\": {\"type\": \"%s\"}".formatted(field, type);
+    }
+
+    private static String inferredJsonType(String field) {
+        String normalized = field == null ? "" : field.toLowerCase(java.util.Locale.ROOT);
+        if (normalized.endsWith("count")
+                || normalized.endsWith("code")
+                || normalized.endsWith("bytes")
+                || normalized.endsWith("millis")) {
+            return "integer";
+        }
+        if (normalized.startsWith("is")
+                || normalized.equals("success")
+                || normalized.equals("truncated")
+                || normalized.equals("created")
+                || normalized.equals("approved")
+                || normalized.equals("queued")
+                || normalized.equals("interrupted")
+                || normalized.equals("running")
+                || normalized.equals("timedout")
+                || normalized.equals("recursive")
+                || normalized.equals("pty")) {
+            return "boolean";
+        }
+        if (normalized.endsWith("s") || normalized.equals("results")) {
+            return "array";
+        }
+        return "string";
     }
 }

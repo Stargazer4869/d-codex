@@ -53,7 +53,17 @@ class ThreadSummaryJsonTest {
                 new ThreadPromptStateSummary(
                         Instant.parse("2026-04-01T00:04:00Z"),
                         new ThreadId("thread-parent"),
-                        2));
+                        2),
+                new ThreadModelSessionSummary(
+                        Instant.parse("2026-04-01T00:05:00Z"),
+                        new ThreadId("thread-parent"),
+                        new ThreadId("thread-root"),
+                        new ThreadId("thread-parent"),
+                        "root/worker-1",
+                        2,
+                        "response-123",
+                        "session-456",
+                        new TurnId("turn-7")));
 
         String json = objectMapper.writeValueAsString(summary);
         ThreadSummary restored = objectMapper.readValue(json, ThreadSummary.class);
@@ -75,6 +85,10 @@ class ThreadSummaryJsonTest {
         assertNotNull(restored.promptState());
         assertEquals(new ThreadId("thread-parent"), restored.promptState().inheritedFromThreadId());
         assertEquals(2, restored.promptState().userInstructionSectionCount());
+        assertNotNull(restored.modelSessionState());
+        assertEquals(new ThreadId("thread-root"), restored.modelSessionState().rootThreadId());
+        assertEquals("response-123", restored.modelSessionState().responseId());
+        assertEquals("session-456", restored.modelSessionState().sessionId());
     }
 
     @Test
@@ -109,6 +123,7 @@ class ThreadSummaryJsonTest {
         assertNull(legacyConstructed.agentStatus());
         assertNull(legacyConstructed.agentClosedAt());
         assertNull(legacyConstructed.promptState());
+        assertNull(legacyConstructed.modelSessionState());
         assertNull(legacyConstructed.sandboxMode());
         assertNull(legacyConstructed.approvalMode());
         assertNull(legacyConstructed.gitSha());
@@ -140,5 +155,6 @@ class ThreadSummaryJsonTest {
         assertNull(restored.agentStatus());
         assertNull(restored.agentClosedAt());
         assertNull(restored.promptState());
+        assertNull(restored.modelSessionState());
     }
 }

@@ -39,7 +39,8 @@ public record ThreadSummary(ThreadId threadId,
                             Integer agentDepth,
                             AgentStatus agentStatus,
                             Instant agentClosedAt,
-                            ThreadPromptStateSummary promptState) {
+                            ThreadPromptStateSummary promptState,
+                            ThreadModelSessionSummary modelSessionState) {
 
     public ThreadSummary {
         title = title == null || title.isBlank() ? "New thread" : title.trim();
@@ -92,6 +93,7 @@ public record ThreadSummary(ThreadId threadId,
                 null,
                 null,
                 null,
+                null,
                 null);
     }
 
@@ -143,6 +145,7 @@ public record ThreadSummary(ThreadId threadId,
                 agentNickname,
                 agentRole,
                 agentPath,
+                null,
                 null,
                 null,
                 null,
@@ -206,6 +209,7 @@ public record ThreadSummary(ThreadId threadId,
                 null,
                 null,
                 null,
+                null,
                 null);
     }
 
@@ -254,6 +258,7 @@ public record ThreadSummary(ThreadId threadId,
                 agentNickname,
                 agentRole,
                 agentPath,
+                null,
                 null,
                 null,
                 null,
@@ -317,6 +322,7 @@ public record ThreadSummary(ThreadId threadId,
                 agentDepth,
                 agentStatus,
                 agentClosedAt,
+                null,
                 null);
     }
 
@@ -380,6 +386,7 @@ public record ThreadSummary(ThreadId threadId,
                 agentDepth,
                 agentStatus,
                 agentClosedAt,
+                null,
                 null);
     }
 
@@ -427,7 +434,8 @@ public record ThreadSummary(ThreadId threadId,
                 agentDepth,
                 runtimeAgentStatus == null ? agentStatus : runtimeAgentStatus,
                 agentClosedAt,
-                promptState);
+                promptState,
+                modelSessionState);
     }
 
     public ThreadSummary withPromptState(ThreadPromptStateSummary promptState) {
@@ -462,7 +470,44 @@ public record ThreadSummary(ThreadId threadId,
                 agentDepth,
                 agentStatus,
                 agentClosedAt,
-                promptState);
+                promptState,
+                modelSessionState);
+    }
+
+    public ThreadSummary withModelSessionState(ThreadModelSessionSummary modelSessionState) {
+        return new ThreadSummary(
+                threadId,
+                title,
+                createdAt,
+                updatedAt,
+                turnCount,
+                preview,
+                firstUserInput,
+                sandboxMode,
+                approvalMode,
+                gitSha,
+                gitBranch,
+                gitOriginUrl,
+                cliVersion,
+                ephemeral,
+                modelProvider,
+                model,
+                status,
+                activeFlags,
+                path,
+                cwd,
+                source,
+                materialized,
+                archivedAt,
+                agentNickname,
+                agentRole,
+                agentPath,
+                parentThreadId,
+                agentDepth,
+                agentStatus,
+                agentClosedAt,
+                promptState,
+                modelSessionState);
     }
 
     private static String normalizePreview(String preview, String fallbackTitle) {

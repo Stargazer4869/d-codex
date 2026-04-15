@@ -11,9 +11,10 @@ Launch the CLI the same way you normally do for this repo.
 What to verify:
 
 - the app starts cleanly
-- the help text shows slash commands
-- `/help`, `/new`, `/threads`, `/history`, `/compact`, `/approvals`, `/approve`, `/reject`, `/fork`, `/archive`, `/unarchive`, and `/rollback` are available
+- the help text shows slash commands and does not advertise `:` commands
+- `/help`, `/new`, `/threads`, `/resume`, `/history`, `/compact`, `/approvals`, `/approve`, `/reject`, `/fork`, `/archive`, `/unarchive`, `/rollback`, `/subagents`, `/agent`, `/skills`, and `/interrupt` are available
 - `/steer` is not part of the user-facing CLI anymore
+- top-level `resume`, `fork`, and `completion` commands are available outside the interactive loop
 
 Suggested first commands:
 
@@ -96,7 +97,8 @@ Suggested commands:
 What to verify:
 
 - the history view reflects the current thread
-- compaction completes and produces a durable memory summary
+- compaction emits started/completed lifecycle output
+- compaction completes and produces a durable handoff summary
 - the reconstructed history remains readable after compaction
 
 ## 6. Exercise Thread Lifecycle
@@ -147,6 +149,23 @@ What to verify:
 
 Some features are implemented at the app-server/protocol layer rather than as CLI commands. Use the stdio app-server directly to verify them.
 
+Spot check unified exec RPCs:
+
+- start the stdio app-server transport
+- initialize a thread
+- send `command/exec` with a short command such as `printf 'one\n'; sleep 1; printf 'two\n'`
+- follow with `command/exec/write` using empty input to poll for more output
+- if the session is PTY-backed, send `command/exec/resize`
+- finish with `command/exec/terminate` on a long-running session
+
+What to verify:
+
+- `command/exec` returns a session id and an initial bounded output snapshot
+- `command/exec/write` can poll incremental output without sending stdin
+- output-delta and completion notifications stream back through the app-server
+- `resize` reports whether it was applied
+- `terminate` ends the session cleanly
+
 Spot check git metadata:
 
 - start the stdio app-server transport
@@ -168,6 +187,7 @@ Spot check background terminals:
 What to verify:
 
 - background terminal summaries include stable ids and live metadata
+- the background terminal maps onto the shared unified-exec session model
 - the cleanup call removes them from the thread view
 
 ## What This Walkthrough Does Not Cover
@@ -176,6 +196,6 @@ This walkthrough intentionally does not claim support for:
 
 - realtime thread sessions
 - audio/WebRTC realtime
-- `reasoningEffort` as a persisted field
+- a native Responses HTTP/WebSocket backend instead of the current chat-backed fallback transport
 
 Those are still separate roadmap items.

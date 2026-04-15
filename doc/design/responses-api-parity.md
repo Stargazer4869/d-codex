@@ -20,29 +20,29 @@ The reference point is the current upstream Codex implementation in `/Users/chen
 
 ## Progress Tracker
 
-Overall status: `planned`
+Overall status: `complete`
 
 ### Delivery phases
 
-- [ ] Phase A: Responses request model and transport seam
-- [ ] Phase B: tool spec and structured output parity
-- [ ] Phase C: streamed response-item runtime
-- [ ] Phase D: reasoning, multimodal, and session-state parity
-- [ ] Phase E: compact endpoint and raw-item app-server parity
+- [x] Phase A: Responses request model and transport seam
+- [x] Phase B: tool spec and structured output parity
+- [x] Phase C: streamed response-item runtime
+- [x] Phase D: reasoning, multimodal, and session-state parity
+- [x] Phase E: compact endpoint and raw-item app-server parity
 
 ### Implementation tasks
 
-- [ ] Add a Java-side `ResponseItem`-style internal model for model-visible input and output
-- [ ] Add a dedicated `ResponsesModelClient` abstraction instead of relying on chat-only transport assumptions
-- [ ] Represent visible tools as Responses-compatible tool specs, not only prompt prose
-- [ ] Carry structured output schemas through the tool registry and planner/runtime pipeline
-- [ ] Add streamed multi-item response handling instead of assuming one assistant text blob
-- [ ] Add streaming interaction surfaces for assistant text, reasoning summaries, and tool activity
-- [ ] Preserve reasoning items and reasoning summaries as first-class runtime data
-- [ ] Add typed multimodal input items for text and images
-- [ ] Add session and turn metadata handling for follow-up requests
-- [ ] Add raw Responses item passthrough for debugging and app-server parity
-- [ ] Add explicit `/responses/compact` parity on top of the current Java compaction model
+- [x] Add a Java-side `ResponseItem`-style internal model for model-visible input and output
+- [x] Add a dedicated `ResponsesModelClient` abstraction instead of relying on chat-only transport assumptions
+- [x] Represent visible tools as Responses-compatible tool specs, not only prompt prose
+- [x] Carry structured output schemas through the tool registry and planner/runtime pipeline
+- [x] Add streamed multi-item response handling instead of assuming one assistant text blob
+- [x] Add streaming interaction surfaces for assistant text, reasoning summaries, and tool activity
+- [x] Preserve reasoning items and reasoning summaries as first-class runtime data
+- [x] Add typed multimodal input items for text and images
+- [x] Add session and turn metadata handling for follow-up requests
+- [x] Add raw Responses item passthrough for debugging and app-server parity
+- [x] Add explicit `/responses/compact` parity on top of the current Java compaction model
 
 ## Why This Matters
 
@@ -291,10 +291,10 @@ The Java runtime already has compaction semantics, but the model-client layer sh
 
 Tracker:
 
-- [ ] Add internal `ModelInputItem` / `ModelOutputItem` domain types
-- [ ] Add a `ResponsesModelClient` interface
-- [ ] Add a first concrete runtime implementation, even if initially backed by existing Spring transport
-- [ ] Make `SpringAiCodexAgent` depend on the new transport seam rather than assembling the whole request inline
+- [x] Add internal `ModelInputItem` / `ModelOutputItem` domain types
+- [x] Add a `ResponsesModelClient` interface
+- [x] Add a first concrete runtime implementation, even if initially backed by existing Spring transport
+- [x] Make `SpringAiCodexAgent` depend on the new transport seam rather than assembling the whole request inline
 
 Cutline:
 
@@ -304,10 +304,10 @@ Cutline:
 
 Tracker:
 
-- [ ] Extend the tool contract layer to produce transport-visible tool specs
-- [ ] Carry output schemas into tool definitions
-- [ ] Mark per-tool parallel-call support in the contract
-- [ ] Stop maintaining a second hardcoded tool list inside prompt prose
+- [x] Extend the tool contract layer to produce transport-visible tool specs
+- [x] Carry output schemas into tool definitions
+- [x] Mark per-tool parallel-call support in the contract
+- [x] Stop maintaining a second hardcoded tool list inside prompt prose
 
 Cutline:
 
@@ -317,12 +317,12 @@ Cutline:
 
 Tracker:
 
-- [ ] Introduce runtime handling for streamed `ModelOutputItem`s
-- [ ] Separate assistant text, reasoning, and tool-call items in the runtime loop
-- [ ] Add streaming interaction events for assistant text, reasoning, tool calls, and turn completion
-- [ ] Render streamed interaction cleanly through the app-server and CLI
-- [ ] Record those items into turn/thread state
-- [ ] Add optional raw item exposure for debugging and app-server parity
+- [x] Introduce runtime handling for streamed `ModelOutputItem`s
+- [x] Separate assistant text, reasoning, and tool-call items in the runtime loop
+- [x] Add streaming interaction events for assistant text, reasoning, tool calls, and turn completion
+- [x] Render streamed interaction cleanly through the app-server and CLI
+- [x] Record those items into turn/thread state
+- [x] Add optional raw item exposure for debugging and app-server parity
 
 Cutline:
 
@@ -333,11 +333,11 @@ Cutline:
 
 Tracker:
 
-- [ ] Add request-side reasoning controls
-- [ ] Add response-side reasoning summary/item handling
-- [ ] Add text + image typed input items
-- [ ] Add session and turn state transport metadata
-- [ ] Define inheritance rules for forked threads and spawned agents
+- [x] Add request-side reasoning controls
+- [x] Add response-side reasoning summary/item handling
+- [x] Add text + image typed input items
+- [x] Add session and turn state transport metadata
+- [x] Define inheritance rules for forked threads and spawned agents
 
 Cutline:
 
@@ -347,10 +347,10 @@ Cutline:
 
 Tracker:
 
-- [ ] Add a dedicated compact-client seam to the model transport
-- [ ] Connect compaction runtime behavior to that seam where appropriate
-- [ ] Add app-server support for optional raw Responses item passthrough
-- [ ] Expose enough metadata for debugging streamed model output
+- [x] Add a dedicated compact-client seam to the model transport
+- [x] Connect compaction runtime behavior to that seam where appropriate
+- [x] Add app-server support for optional raw Responses item passthrough
+- [x] Expose enough metadata for debugging streamed model output
 
 Cutline:
 
@@ -358,17 +358,17 @@ Cutline:
 
 ## Recommended Issue Breakdown
 
-- [ ] Issue 1: add internal `ModelInputItem` and `ModelOutputItem` types
-- [ ] Issue 2: add a `ResponsesModelClient` seam and migrate `SpringAiCodexAgent` onto it
-- [ ] Issue 3: upgrade tool contract resolution into transport-visible tool specs
-- [ ] Issue 4: carry `output_schema` through tool definitions and planner/runtime handling
-- [ ] Issue 5: add streamed item processing for assistant, reasoning, and tool-call items
-- [ ] Issue 6: add streamed interaction events and CLI/app-server rendering for turn progress
-- [ ] Issue 7: persist reasoning items and summaries into turn/thread state
-- [ ] Issue 8: add typed multimodal input items
-- [ ] Issue 9: add turn/session metadata and inheritance rules for subagents
-- [ ] Issue 10: add raw item passthrough on the app-server event path
-- [ ] Issue 11: add dedicated compact-client parity
+- [x] Issue 1: add internal `ModelInputItem` and `ModelOutputItem` types
+- [x] Issue 2: add a `ResponsesModelClient` seam and migrate `SpringAiCodexAgent` onto it
+- [x] Issue 3: upgrade tool contract resolution into transport-visible tool specs
+- [x] Issue 4: carry `output_schema` through tool definitions and planner/runtime handling
+- [x] Issue 5: add streamed item processing for assistant, reasoning, and tool-call items
+- [x] Issue 6: add streamed interaction events and CLI/app-server rendering for turn progress
+- [x] Issue 7: persist reasoning items and summaries into turn/thread state
+- [x] Issue 8: add typed multimodal input items
+- [x] Issue 9: add turn/session metadata and inheritance rules for subagents
+- [x] Issue 10: add raw item passthrough on the app-server event path
+- [x] Issue 11: add dedicated compact-client parity
 
 ## What We Should Not Do
 

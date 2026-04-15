@@ -93,10 +93,14 @@ import org.dean.codex.protocol.event.CodexTurnResult;
 import org.dean.codex.protocol.item.TurnItem;
 import org.dean.codex.protocol.item.UserMessageItem;
 import org.dean.codex.protocol.item.CollabDeliveryState;
+import org.dean.codex.protocol.item.RawModelOutputItem;
+import org.dean.codex.protocol.item.AgentMessageItem;
 import org.dean.codex.protocol.skill.SkillMetadata;
 import org.dean.codex.protocol.skill.SkillScope;
 import org.dean.codex.protocol.tool.CommandApprovalDecision;
 import org.dean.codex.protocol.tool.ShellCommandResult;
+import org.dean.codex.runtime.springai.model.ThreadModelSessionSnapshot;
+import org.dean.codex.runtime.springai.model.ThreadModelSessionStateStore;
 import org.dean.codex.runtime.springai.runtime.DefaultCodexRuntimeGateway;
 import org.dean.codex.runtime.springai.prompt.ThreadPromptSnapshot;
 import org.dean.codex.runtime.springai.prompt.ThreadPromptStateStore;
@@ -175,11 +179,16 @@ class InProcessCodexAppServerTest {
             assertTrue(forked.ephemeral());
             assertNotNull(forked.promptState());
             assertEquals(parentThreadId, forked.promptState().inheritedFromThreadId());
+            assertNotNull(forked.modelSessionState());
+            assertEquals(parentThreadId, forked.modelSessionState().inheritedFromThreadId());
+            assertEquals(parentThreadId, forked.modelSessionState().rootThreadId());
 
             var forkedRead = session.threadRead(new ThreadReadParams(forked.threadId(), true));
             assertEquals(1, forkedRead.turns().size());
             assertNotNull(forkedRead.thread().promptState());
             assertEquals(parentThreadId, forkedRead.thread().promptState().inheritedFromThreadId());
+            assertNotNull(forkedRead.thread().modelSessionState());
+            assertEquals(parentThreadId, forkedRead.thread().modelSessionState().inheritedFromThreadId());
             assertTrue(session.threadLoadedList(new ThreadLoadedListParams()).data().contains(forked.threadId()));
 
             session.turnStart(new TurnStartParams(forked.threadId(), "Write follow-up"));
@@ -209,6 +218,34 @@ class InProcessCodexAppServerTest {
                             && item.item() instanceof UserMessageItem userMessageItem
                             && userMessageItem.text().contains("focus on tests")));
             assertTrue(observed.stream().anyMatch(TurnCompletedNotification.class::isInstance));
+        }
+    }
+
+    @Test
+    void turnStartCanPassthroughRawModelOutputItemsOverAppServerNotifications() throws Exception {
+        CodexAppServer appServer = appServer(new RawItemTurnExecutor());
+        BlockingQueue<AppServerNotification> notifications = new LinkedBlockingQueue<>();
+
+        try (CodexAppServerSession session = initializedSession(appServer);
+             AutoCloseable ignored = session.subscribe(notifications::add)) {
+            ThreadId threadId = session.threadStart(new ThreadStartParams("Raw item thread")).thread().threadId();
+            session.turnStart(new TurnStartParams(threadId, "Inspect repo"));
+
+            List<AppServerNotification> observed = awaitNotifications(notifications, 5);
+            RawModelOutputItem rawItem = observed.stream()
+                    .filter(TurnItemNotification.class::isInstance)
+                    .map(TurnItemNotification.class::cast)
+                    .map(TurnItemNotification::item)
+                    .filter(RawModelOutputItem.class::isInstance)
+                    .map(RawModelOutputItem.class::cast)
+                    .findFirst()
+                    .orElseThrow();
+
+            assertEquals("reasoning", rawItem.modelItemType());
+            assertEquals("resp-item-1", rawItem.modelItemId());
+            assertEquals(threadId.value(), rawItem.threadId());
+            assertEquals(1, rawItem.streamSequence());
+            assertTrue(rawItem.payloadJson().contains("Need to inspect README"));
         }
     }
 
@@ -1217,6 +1254,7 @@ class InProcessCodexAppServerTest {
                 List.of(),
                 Instant.now());
         InMemoryThreadPromptStateStore promptStateStore = new InMemoryThreadPromptStateStore();
+        InMemoryThreadModelSessionStateStore modelSessionStateStore = new InMemoryThreadModelSessionStateStore();
         return new InProcessCodexAppServer(
                 new DefaultCodexRuntimeGateway(
                         store,
@@ -1230,6 +1268,7 @@ class InProcessCodexAppServerTest {
                                 "Base instructions",
                                 List.of("Project instructions:\nStay focused."),
                                 Instant.parse("2026-04-09T00:00:00Z")),
+                        modelSessionStateStore,
                         4),
                 shellCommandTool,
                 execSessionManager);
@@ -1330,6 +1369,22 @@ class InProcessCodexAppServerTest {
         }
     }
 
+    private static final class InMemoryThreadModelSessionStateStore implements ThreadModelSessionStateStore {
+
+        private final java.util.Map<ThreadId, ThreadModelSessionSnapshot> snapshots = new java.util.HashMap<>();
+
+        @Override
+        public Optional<ThreadModelSessionSnapshot> read(ThreadId threadId) {
+            return Optional.ofNullable(snapshots.get(threadId));
+        }
+
+        @Override
+        public ThreadModelSessionSnapshot write(ThreadId threadId, ThreadModelSessionSnapshot snapshot) {
+            snapshots.put(threadId, snapshot);
+            return snapshot;
+        }
+    }
+
     private CodexAppServerSession initializedSession(CodexAppServer appServer) {
         return initializedSession(appServer, List.of());
     }
@@ -1394,6 +1449,43 @@ class InProcessCodexAppServerTest {
         @Override
         public CodexTurnResult executeTurn(ThreadId threadId, TurnId turnId, String input, Consumer<TurnItem> itemConsumer, TurnControl turnControl) {
             return new CodexTurnResult(threadId, turnId, TurnStatus.COMPLETED, List.of(), "done");
+        }
+
+        @Override
+        public CodexTurnResult resumeTurn(ThreadId threadId, TurnId turnId) {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    private static final class RawItemTurnExecutor implements TurnExecutor {
+        @Override
+        public CodexTurnResult executeTurn(ThreadId threadId, String input) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public CodexTurnResult executeTurn(ThreadId threadId, TurnId turnId, String input, Consumer<TurnItem> itemConsumer, TurnControl turnControl) {
+            RawModelOutputItem rawItem = new RawModelOutputItem(
+                    new ItemId("raw-1"),
+                    "reasoning",
+                    "resp-item-1",
+                    "stream-1",
+                    1,
+                    threadId.value(),
+                    turnId.value(),
+                    1,
+                    "response-1",
+                    "session-1",
+                    "completed",
+                    "{\"id\":\"resp-item-1\",\"summary\":\"Need to inspect README\"}",
+                    Instant.parse("2026-04-13T00:00:00Z"));
+            AgentMessageItem assistant = new AgentMessageItem(
+                    new ItemId("assistant-1"),
+                    "done",
+                    Instant.parse("2026-04-13T00:00:01Z"));
+            itemConsumer.accept(rawItem);
+            itemConsumer.accept(assistant);
+            return new CodexTurnResult(threadId, turnId, TurnStatus.COMPLETED, List.of(rawItem, assistant), "done");
         }
 
         @Override

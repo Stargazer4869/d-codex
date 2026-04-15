@@ -108,6 +108,9 @@ public class CodexProperties {
     public static class Model {
         private int contextWindow = 272_000;
         private int autoCompactTokenLimit = 200_000;
+        private boolean emitRawOutputItems = false;
+        private String reasoningEffort = "";
+        private String reasoningSummaryMode = "";
 
         public int getContextWindow() {
             return contextWindow;
@@ -123,6 +126,30 @@ public class CodexProperties {
 
         public void setAutoCompactTokenLimit(int autoCompactTokenLimit) {
             this.autoCompactTokenLimit = autoCompactTokenLimit;
+        }
+
+        public boolean isEmitRawOutputItems() {
+            return emitRawOutputItems;
+        }
+
+        public void setEmitRawOutputItems(boolean emitRawOutputItems) {
+            this.emitRawOutputItems = emitRawOutputItems;
+        }
+
+        public String getReasoningEffort() {
+            return reasoningEffort;
+        }
+
+        public void setReasoningEffort(String reasoningEffort) {
+            this.reasoningEffort = reasoningEffort;
+        }
+
+        public String getReasoningSummaryMode() {
+            return reasoningSummaryMode;
+        }
+
+        public void setReasoningSummaryMode(String reasoningSummaryMode) {
+            this.reasoningSummaryMode = reasoningSummaryMode;
         }
     }
 

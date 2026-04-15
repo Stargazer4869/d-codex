@@ -5,6 +5,13 @@ import org.dean.codex.core.agent.AgentControl;
 import org.dean.codex.core.context.ContextManager;
 import org.dean.codex.core.context.ThreadContextReconstructionService;
 import org.dean.codex.core.conversation.InMemoryConversationStore;
+import org.dean.codex.core.model.InputTextItem;
+import org.dean.codex.core.model.InputImageItem;
+import org.dean.codex.core.model.ModelInputItem;
+import org.dean.codex.core.model.ModelInputRole;
+import org.dean.codex.core.model.ModelRequest;
+import org.dean.codex.core.model.ModelOutputItem;
+import org.dean.codex.core.model.ResponsesModelClient;
 import org.dean.codex.core.skill.ResolvedSkill;
 import org.dean.codex.core.skill.SkillService;
 import org.dean.codex.core.tool.local.ExecCommandTool;
@@ -28,6 +35,7 @@ import org.dean.codex.protocol.context.ThreadMemory;
 import org.dean.codex.protocol.conversation.ThreadId;
 import org.dean.codex.protocol.conversation.TurnId;
 import org.dean.codex.protocol.conversation.TurnStatus;
+import org.dean.codex.protocol.event.CodexTurnResult;
 import org.dean.codex.protocol.tool.CommandApprovalDecision;
 import org.dean.codex.protocol.tool.ExecCommandResult;
 import org.dean.codex.protocol.tool.FileReadResult;
@@ -40,9 +48,15 @@ import org.dean.codex.protocol.tool.ShellCommandResult;
 import org.dean.codex.protocol.tool.WebSearchResult;
 import org.dean.codex.protocol.item.CollabToolCallItem;
 import org.dean.codex.protocol.item.CollabToolCallStatus;
+import org.dean.codex.protocol.item.AgentMessageItem;
+import org.dean.codex.protocol.item.RawModelOutputItem;
+import org.dean.codex.protocol.item.ReasoningItem;
 import org.dean.codex.protocol.item.ToolCallItem;
 import org.dean.codex.protocol.item.ToolResultItem;
+import org.dean.codex.protocol.item.TurnItem;
 import org.dean.codex.runtime.springai.config.CodexProperties;
+import org.dean.codex.runtime.springai.model.ThreadModelSessionSnapshot;
+import org.dean.codex.runtime.springai.model.ThreadModelSessionStateStore;
 import org.dean.codex.protocol.skill.SkillMetadata;
 import org.dean.codex.protocol.skill.SkillScope;
 import org.junit.jupiter.api.BeforeEach;
@@ -75,6 +89,7 @@ import java.util.function.Consumer;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -132,6 +147,415 @@ class SpringAiCodexAgentTest {
         assertEquals("README.md", step.actions().get(1).path());
         assertEquals("foo", step.actions().get(1).oldText());
         assertEquals("bar", step.actions().get(1).newText());
+    }
+
+    @Test
+    void requestDecisionBuildsTypedModelRequestForResponsesClient() {
+        RecordingResponsesModelClient modelClient = new RecordingResponsesModelClient("""
+                {
+                  "summary": "Done",
+                  "finalAnswer": "Finished"
+                }
+                """);
+        SpringAiCodexAgent responsesAgent = new SpringAiCodexAgent(
+                modelClient,
+                path -> new FileReadResult(true, path, "", false, 0, ""),
+                (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                (path, maxDepth) -> new ListDirResult(true, path, maxDepth == null ? 1 : maxDepth, List.of(), 0, false, ""),
+                new NoOpWebSearchTool(),
+                (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
+                (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
+                new StubShellCommandTool(),
+                new NoOpExecCommandTool(),
+                new NoOpCommandApprovalService(),
+                new NoOpAgentControl(),
+                new FixedThreadContextReconstructionService(smallPromptContext()),
+                new NoOpContextManager(),
+                new NoOpSkillService(),
+                Path.of("/tmp/workspace"),
+                defaultModelProperties()
+        );
+
+        SpringAiCodexAgent.PlannerStep step = responsesAgent.requestDecision(
+                new ThreadId("thread-typed"),
+                new TurnId("turn-typed"),
+                "Inspect the repo",
+                List.of(),
+                "",
+                1,
+                List.of(),
+                List.of(),
+                List.of());
+
+        assertTrue(step.isFinished());
+        ModelRequest request = modelClient.lastRequest;
+        assertNotNull(request);
+        assertEquals("thread-typed", request.metadata().threadId());
+        assertEquals("turn-typed", request.metadata().turnId());
+        assertEquals(1, request.metadata().step());
+        assertEquals(1, request.inputItems().size());
+        assertInstanceOf(InputTextItem.class, request.inputItems().get(0));
+        assertTrue(((InputTextItem) request.inputItems().get(0)).text().contains("Latest user request:"));
+        assertFalse(request.toolSpecs().isEmpty());
+        assertTrue(request.parallelToolCalls());
+        assertTrue(request.toolSpecs().stream().anyMatch(tool -> "READ_FILE".equals(tool.name()) && !tool.inputSchema().isBlank()));
+        assertTrue(request.toolSpecs().stream().anyMatch(tool -> "READ_FILE".equals(tool.name()) && !tool.outputSchema().isBlank()));
+        assertTrue(request.toolSpecs().stream().anyMatch(tool -> "READ_FILE".equals(tool.name()) && tool.supportsParallelExecution()));
+        assertEquals("", request.reasoningConfig().effort());
+        assertEquals("", request.reasoningConfig().summaryMode());
+    }
+
+    @Test
+    void requestDecisionCarriesConfiguredReasoningControlsIntoTypedModelRequest() {
+        RecordingResponsesModelClient modelClient = new RecordingResponsesModelClient("""
+                {
+                  "summary": "Done",
+                  "finalAnswer": "Finished"
+                }
+                """);
+        CodexProperties properties = defaultModelProperties();
+        properties.getModel().setReasoningEffort("high");
+        properties.getModel().setReasoningSummaryMode("detailed");
+        SpringAiCodexAgent responsesAgent = new SpringAiCodexAgent(
+                modelClient,
+                path -> new FileReadResult(true, path, "", false, 0, ""),
+                (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                (path, maxDepth) -> new ListDirResult(true, path, maxDepth == null ? 1 : maxDepth, List.of(), 0, false, ""),
+                new NoOpWebSearchTool(),
+                (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
+                (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
+                new StubShellCommandTool(),
+                new NoOpExecCommandTool(),
+                new NoOpCommandApprovalService(),
+                new NoOpAgentControl(),
+                new FixedThreadContextReconstructionService(smallPromptContext()),
+                new NoOpContextManager(),
+                new NoOpSkillService(),
+                Path.of("/tmp/workspace"),
+                properties
+        );
+
+        SpringAiCodexAgent.PlannerStep step = responsesAgent.requestDecision(
+                new ThreadId("thread-reasoning-request"),
+                new TurnId("turn-reasoning-request"),
+                "Inspect the repo",
+                List.of(),
+                "",
+                1,
+                List.of(),
+                List.of(),
+                List.of());
+
+        assertTrue(step.isFinished());
+        ModelRequest request = modelClient.lastRequest;
+        assertNotNull(request);
+        assertEquals("high", request.reasoningConfig().effort());
+        assertEquals("detailed", request.reasoningConfig().summaryMode());
+    }
+
+    @Test
+    void requestDecisionCarriesImageInputsIntoTypedModelRequest() {
+        RecordingResponsesModelClient modelClient = new RecordingResponsesModelClient("""
+                {
+                  "summary": "Done",
+                  "finalAnswer": "Finished"
+                }
+                """);
+        SpringAiCodexAgent responsesAgent = new SpringAiCodexAgent(
+                modelClient,
+                path -> new FileReadResult(true, path, "", false, 0, ""),
+                (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                (path, maxDepth) -> new ListDirResult(true, path, maxDepth == null ? 1 : maxDepth, List.of(), 0, false, ""),
+                new NoOpWebSearchTool(),
+                (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
+                (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
+                new StubShellCommandTool(),
+                new NoOpExecCommandTool(),
+                new NoOpCommandApprovalService(),
+                new NoOpAgentControl(),
+                new FixedThreadContextReconstructionService(smallPromptContext()),
+                new NoOpContextManager(),
+                new NoOpSkillService(),
+                Path.of("/tmp/workspace"),
+                defaultModelProperties()
+        );
+
+        responsesAgent.requestDecision(
+                new ThreadId("thread-image"),
+                new TurnId("turn-image"),
+                "Inspect the screenshot",
+                List.of(new InputImageItem(ModelInputRole.USER, "file:///tmp/screenshot.png", "high")),
+                "",
+                1,
+                List.of(),
+                List.of(),
+                List.of());
+
+        ModelRequest request = modelClient.lastRequest;
+        assertNotNull(request);
+        assertEquals(2, request.inputItems().size());
+        assertInstanceOf(InputTextItem.class, request.inputItems().get(0));
+        assertInstanceOf(InputImageItem.class, request.inputItems().get(1));
+        InputImageItem imageItem = (InputImageItem) request.inputItems().get(1);
+        assertEquals("file:///tmp/screenshot.png", imageItem.imageUrl());
+        assertEquals("high", imageItem.detail());
+    }
+
+    @Test
+    void requestDecisionCarriesPreviousResponseMetadataOnFollowUpRequests() {
+        RecordingResponsesModelClient modelClient = new RecordingResponsesModelClient("""
+                {
+                  "summary": "Done",
+                  "finalAnswer": "Finished"
+                }
+                """);
+        modelClient.setResponseMetadata("response-1", "session-1");
+        InMemoryThreadModelSessionStateStore modelSessionStateStore = new InMemoryThreadModelSessionStateStore();
+        SpringAiCodexAgent responsesAgent = new SpringAiCodexAgent(
+                modelClient,
+                path -> new FileReadResult(true, path, "", false, 0, ""),
+                (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                (path, maxDepth) -> new ListDirResult(true, path, maxDepth == null ? 1 : maxDepth, List.of(), 0, false, ""),
+                new NoOpWebSearchTool(),
+                (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
+                (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
+                new StubShellCommandTool(),
+                new NoOpExecCommandTool(),
+                new NoOpCommandApprovalService(),
+                new NoOpAgentControl(),
+                new FixedThreadContextReconstructionService(smallPromptContext()),
+                new NoOpContextManager(),
+                new NoOpSkillService(),
+                Path.of("/tmp/workspace"),
+                defaultModelProperties(),
+                modelSessionStateStore
+        );
+
+        responsesAgent.requestDecision(
+                new ThreadId("thread-follow-up"),
+                new TurnId("turn-1"),
+                "Inspect the repo",
+                List.of(),
+                "",
+                1,
+                List.of(),
+                List.of(),
+                List.of());
+
+        ThreadModelSessionSnapshot snapshot = modelSessionStateStore.read(new ThreadId("thread-follow-up")).orElseThrow();
+        assertEquals("response-1", snapshot.responseId());
+        assertEquals("session-1", snapshot.sessionId());
+        assertEquals(new TurnId("turn-1"), snapshot.lastTurnId());
+
+        responsesAgent.requestDecision(
+                new ThreadId("thread-follow-up"),
+                new TurnId("turn-2"),
+                "Continue",
+                List.of(),
+                "",
+                2,
+                List.of(),
+                List.of(),
+                List.of());
+
+        ModelRequest request = modelClient.lastRequest;
+        assertNotNull(request);
+        assertEquals("thread-follow-up", request.metadata().threadId());
+        assertEquals("turn-2", request.metadata().turnId());
+        assertEquals(2, request.metadata().step());
+        assertEquals("thread-follow-up", request.metadata().rootThreadId());
+        assertEquals("response-1", request.metadata().previousResponseId());
+        assertEquals("session-1", request.metadata().providerSessionId());
+    }
+
+    @Test
+    void handleTurnStreamsReasoningItemsFromResponsesClient() {
+        RecordingResponsesModelClient modelClient = new RecordingResponsesModelClient("""
+                {
+                  "summary": "Done",
+                  "finalAnswer": "Finished"
+                }
+                """);
+        modelClient.emitReasoning("Need to inspect README", "The request mentions setup issues.");
+        SpringAiCodexAgent responsesAgent = new SpringAiCodexAgent(
+                modelClient,
+                path -> new FileReadResult(true, path, "", false, 0, ""),
+                (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                (path, maxDepth) -> new ListDirResult(true, path, maxDepth == null ? 1 : maxDepth, List.of(), 0, false, ""),
+                new NoOpWebSearchTool(),
+                (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
+                (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
+                new StubShellCommandTool(),
+                new NoOpExecCommandTool(),
+                new NoOpCommandApprovalService(),
+                new NoOpAgentControl(),
+                new FixedThreadContextReconstructionService(smallPromptContext()),
+                new NoOpContextManager(),
+                new NoOpSkillService(),
+                Path.of("/tmp/workspace"),
+                defaultModelProperties()
+        );
+
+        List<org.dean.codex.protocol.item.TurnItem> items = new ArrayList<>();
+        CodexTurnResult result = responsesAgent.handleTurn(
+                new ThreadId("thread-reasoning"),
+                new TurnId("turn-reasoning"),
+                "Inspect README",
+                items::add);
+
+        assertEquals(TurnStatus.COMPLETED, result.status());
+        assertTrue(items.stream().anyMatch(ReasoningItem.class::isInstance));
+        ReasoningItem reasoningItem = items.stream()
+                .filter(ReasoningItem.class::isInstance)
+                .map(ReasoningItem.class::cast)
+                .findFirst()
+                .orElseThrow();
+        assertEquals("Need to inspect README", reasoningItem.summary());
+        assertEquals("The request mentions setup issues.", reasoningItem.detail());
+    }
+
+    @Test
+    void handleTurnEmitsRawModelOutputItemsWhenEnabled() {
+        RecordingResponsesModelClient modelClient = new RecordingResponsesModelClient("""
+                {
+                  "summary": "Done",
+                  "finalAnswer": "Finished"
+                }
+                """);
+        modelClient.emitReasoning("Need to inspect README", "The request mentions setup issues.");
+        SpringAiCodexAgent responsesAgent = new SpringAiCodexAgent(
+                modelClient,
+                path -> new FileReadResult(true, path, "", false, 0, ""),
+                (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                (path, maxDepth) -> new ListDirResult(true, path, maxDepth == null ? 1 : maxDepth, List.of(), 0, false, ""),
+                new NoOpWebSearchTool(),
+                (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
+                (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
+                new StubShellCommandTool(),
+                new NoOpExecCommandTool(),
+                new NoOpCommandApprovalService(),
+                new NoOpAgentControl(),
+                new FixedThreadContextReconstructionService(smallPromptContext()),
+                new NoOpContextManager(),
+                new NoOpSkillService(),
+                Path.of("/tmp/workspace"),
+                codexPropertiesWithRawModelOutputItems()
+        );
+
+        List<TurnItem> items = new ArrayList<>();
+        CodexTurnResult result = responsesAgent.handleTurn(
+                new ThreadId("thread-raw"),
+                new TurnId("turn-raw"),
+                "Inspect the repo",
+                items::add);
+
+        assertEquals(TurnStatus.COMPLETED, result.status());
+        assertTrue(items.stream().anyMatch(RawModelOutputItem.class::isInstance));
+        RawModelOutputItem rawItem = items.stream()
+                .filter(RawModelOutputItem.class::isInstance)
+                .map(RawModelOutputItem.class::cast)
+                .filter(item -> item.modelItemType().equals("reasoning"))
+                .findFirst()
+                .orElseThrow();
+        assertEquals("reasoning", rawItem.modelItemType());
+        assertEquals("thread-raw", rawItem.threadId());
+        assertEquals("turn-raw", rawItem.turnId());
+        assertEquals(1, rawItem.step());
+        assertTrue(!rawItem.streamId().isBlank());
+        assertEquals(1, rawItem.streamSequence());
+        assertTrue(rawItem.payloadJson().contains("Need to inspect README"));
+        RawModelOutputItem responseMetadataItem = items.stream()
+                .filter(RawModelOutputItem.class::isInstance)
+                .map(RawModelOutputItem.class::cast)
+                .filter(item -> item.modelItemType().equals("response_metadata"))
+                .findFirst()
+                .orElseThrow();
+        assertEquals("completed", responseMetadataItem.finishReason());
+    }
+
+    @Test
+    void handleTurnStreamsNonJsonAssistantMessagesAndDeduplicatesFinalAnswer() {
+        RecordingResponsesModelClient modelClient = new RecordingResponsesModelClient("""
+                {
+                  "summary": "Done",
+                  "finalAnswer": "Finished"
+                }
+                """);
+        modelClient.emitAssistant("Finished");
+        SpringAiCodexAgent responsesAgent = new SpringAiCodexAgent(
+                modelClient,
+                path -> new FileReadResult(true, path, "", false, 0, ""),
+                (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                (path, maxDepth) -> new ListDirResult(true, path, maxDepth == null ? 1 : maxDepth, List.of(), 0, false, ""),
+                new NoOpWebSearchTool(),
+                (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
+                (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
+                new StubShellCommandTool(),
+                new NoOpExecCommandTool(),
+                new NoOpCommandApprovalService(),
+                new NoOpAgentControl(),
+                new FixedThreadContextReconstructionService(smallPromptContext()),
+                new NoOpContextManager(),
+                new NoOpSkillService(),
+                Path.of("/tmp/workspace"),
+                defaultModelProperties()
+        );
+
+        List<org.dean.codex.protocol.item.TurnItem> items = new ArrayList<>();
+        CodexTurnResult result = responsesAgent.handleTurn(
+                new ThreadId("thread-assistant"),
+                new TurnId("turn-assistant"),
+                "Inspect README",
+                items::add);
+
+        assertEquals(TurnStatus.COMPLETED, result.status());
+        List<AgentMessageItem> assistantItems = items.stream()
+                .filter(AgentMessageItem.class::isInstance)
+                .map(AgentMessageItem.class::cast)
+                .toList();
+        assertEquals(1, assistantItems.size());
+        assertEquals("Finished", assistantItems.get(0).text());
+    }
+
+    @Test
+    void handleTurnStreamsModelToolCallAndToolResultItems() {
+        RecordingResponsesModelClient modelClient = new RecordingResponsesModelClient("""
+                {
+                  "summary": "Done",
+                  "finalAnswer": "Finished"
+                }
+                """);
+        modelClient.emitToolCall("READ_FILE", "{\"path\":\"README.md\"}");
+        modelClient.emitToolResult("READ_FILE", "success=true path=README.md");
+        SpringAiCodexAgent responsesAgent = new SpringAiCodexAgent(
+                modelClient,
+                path -> new FileReadResult(true, path, "", false, 0, ""),
+                (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                (path, maxDepth) -> new ListDirResult(true, path, maxDepth == null ? 1 : maxDepth, List.of(), 0, false, ""),
+                new NoOpWebSearchTool(),
+                (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
+                (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
+                new StubShellCommandTool(),
+                new NoOpExecCommandTool(),
+                new NoOpCommandApprovalService(),
+                new NoOpAgentControl(),
+                new FixedThreadContextReconstructionService(smallPromptContext()),
+                new NoOpContextManager(),
+                new NoOpSkillService(),
+                Path.of("/tmp/workspace"),
+                defaultModelProperties()
+        );
+
+        List<org.dean.codex.protocol.item.TurnItem> items = new ArrayList<>();
+        CodexTurnResult result = responsesAgent.handleTurn(
+                new ThreadId("thread-tool-items"),
+                new TurnId("turn-tool-items"),
+                "Inspect README",
+                items::add);
+
+        assertEquals(TurnStatus.COMPLETED, result.status());
+        assertTrue(items.stream().anyMatch(ToolCallItem.class::isInstance));
+        assertTrue(items.stream().anyMatch(ToolResultItem.class::isInstance));
     }
 
     @Test
@@ -1027,6 +1451,7 @@ class SpringAiCodexAgentTest {
             protected PlannerStep requestDecision(ThreadId threadId,
                                                   TurnId turnId,
                                                   String input,
+                                                  List<ModelInputItem> inputItems,
                                                   String scratchpad,
                                                   int step,
                                                   List<ResolvedSkill> selectedSkills,
@@ -1045,7 +1470,7 @@ class SpringAiCodexAgentTest {
                 if (step == 3) {
                     assertTrue(currentExecSessionsForPrompt().isEmpty());
                 }
-                return super.requestDecision(threadId, turnId, input, scratchpad, step, selectedSkills, availableSkills, steeringInputs);
+                return super.requestDecision(threadId, turnId, input, inputItems, scratchpad, step, selectedSkills, availableSkills, steeringInputs);
             }
         };
 
@@ -1183,6 +1608,86 @@ class SpringAiCodexAgentTest {
         @Override
         public ChatClient.Builder mutate() {
             return new NoOpChatClientBuilder();
+        }
+    }
+
+    private static final class RecordingResponsesModelClient implements ResponsesModelClient {
+
+        private final String assistantText;
+        private final List<org.dean.codex.core.model.ModelOutputItem> prefetchedItems = new ArrayList<>();
+        private String responseId = "response-1";
+        private String sessionId = "";
+        private ModelRequest lastRequest;
+
+        private RecordingResponsesModelClient(String assistantText) {
+            this.assistantText = assistantText;
+        }
+
+        @Override
+        public org.dean.codex.core.model.ModelResponse complete(ModelRequest request, Consumer<ModelOutputItem> outputItemConsumer) {
+            this.lastRequest = request;
+            for (org.dean.codex.core.model.ModelOutputItem prefetchedItem : prefetchedItems) {
+                if (outputItemConsumer != null) {
+                    outputItemConsumer.accept(prefetchedItem);
+                }
+            }
+            org.dean.codex.core.model.ModelAssistantMessageItem messageItem =
+                    new org.dean.codex.core.model.ModelAssistantMessageItem("response-1", assistantText);
+            if (outputItemConsumer != null) {
+                outputItemConsumer.accept(messageItem);
+            }
+            return new org.dean.codex.core.model.ModelResponse(
+                    new org.dean.codex.core.model.ModelResponseMetadata(responseId, sessionId, "completed"),
+                    List.of(messageItem));
+        }
+
+        private void setResponseMetadata(String responseId, String sessionId) {
+            this.responseId = responseId;
+            this.sessionId = sessionId;
+        }
+
+        private void emitReasoning(String summary, String content) {
+            prefetchedItems.add(new org.dean.codex.core.model.ModelReasoningItem(
+                    "reasoning-1",
+                    summary,
+                    content));
+        }
+
+        private void emitAssistant(String text) {
+            prefetchedItems.add(new org.dean.codex.core.model.ModelAssistantMessageItem(
+                    "assistant-1",
+                    text));
+        }
+
+        private void emitToolCall(String toolName, String argumentsJson) {
+            prefetchedItems.add(new org.dean.codex.core.model.ModelToolCallItem(
+                    "tool-call-1",
+                    toolName,
+                    argumentsJson));
+        }
+
+        private void emitToolResult(String toolName, String outputText) {
+            prefetchedItems.add(new org.dean.codex.core.model.ModelToolResultItem(
+                    "tool-result-1",
+                    toolName,
+                    outputText,
+                    false));
+        }
+    }
+
+    private static final class InMemoryThreadModelSessionStateStore implements ThreadModelSessionStateStore {
+
+        private final java.util.Map<ThreadId, ThreadModelSessionSnapshot> snapshots = new java.util.HashMap<>();
+
+        @Override
+        public java.util.Optional<ThreadModelSessionSnapshot> read(ThreadId threadId) {
+            return java.util.Optional.ofNullable(snapshots.get(threadId));
+        }
+
+        @Override
+        public ThreadModelSessionSnapshot write(ThreadId threadId, ThreadModelSessionSnapshot snapshot) {
+            snapshots.put(threadId, snapshot);
+            return snapshot;
         }
     }
 
@@ -1677,6 +2182,7 @@ class SpringAiCodexAgentTest {
         protected PlannerStep requestDecision(ThreadId threadId,
                                               TurnId turnId,
                                               String input,
+                                              List<ModelInputItem> inputItems,
                                               String scratchpad,
                                               int step,
                                               List<ResolvedSkill> selectedSkills,
@@ -1718,6 +2224,12 @@ class SpringAiCodexAgentTest {
 
     private static CodexProperties defaultModelProperties() {
         return codexProperties(6, 2, 0, 0);
+    }
+
+    private static CodexProperties codexPropertiesWithRawModelOutputItems() {
+        CodexProperties properties = defaultModelProperties();
+        properties.getModel().setEmitRawOutputItems(true);
+        return properties;
     }
 
     private static CodexProperties codexProperties(int maxSteps,

@@ -3,8 +3,10 @@ package org.dean.codex.runtime.springai.history;
 import org.dean.codex.protocol.conversation.MessageRole;
 import org.dean.codex.protocol.conversation.TurnId;
 import org.dean.codex.protocol.history.HistoryApprovalItem;
+import org.dean.codex.protocol.history.HistoryImageItem;
 import org.dean.codex.protocol.history.HistoryMessageItem;
 import org.dean.codex.protocol.history.HistoryPlanItem;
+import org.dean.codex.protocol.history.HistoryReasoningItem;
 import org.dean.codex.protocol.history.HistoryRuntimeErrorItem;
 import org.dean.codex.protocol.history.HistorySkillUseItem;
 import org.dean.codex.protocol.history.HistoryToolCallItem;
@@ -15,11 +17,14 @@ import org.dean.codex.protocol.item.AgentMessageItem;
 import org.dean.codex.protocol.item.ApprovalItem;
 import org.dean.codex.protocol.item.CollabToolCallItem;
 import org.dean.codex.protocol.item.PlanItem;
+import org.dean.codex.protocol.item.RawModelOutputItem;
 import org.dean.codex.protocol.item.RuntimeErrorItem;
+import org.dean.codex.protocol.item.ReasoningItem;
 import org.dean.codex.protocol.item.SkillUseItem;
 import org.dean.codex.protocol.item.ToolCallItem;
 import org.dean.codex.protocol.item.ToolResultItem;
 import org.dean.codex.protocol.item.TurnItem;
+import org.dean.codex.protocol.item.UserImageItem;
 import org.dean.codex.protocol.item.UserMessageItem;
 
 import java.util.List;
@@ -38,6 +43,9 @@ public final class ThreadHistoryMapper {
     public static List<ThreadHistoryItem> map(TurnId turnId, TurnItem item) {
         if (item instanceof UserMessageItem userMessageItem) {
             return List.of(new HistoryMessageItem(turnId, MessageRole.USER, userMessageItem.text(), userMessageItem.createdAt()));
+        }
+        if (item instanceof UserImageItem userImageItem) {
+            return List.of(new HistoryImageItem(turnId, userImageItem.imageUrl(), userImageItem.detail(), userImageItem.createdAt()));
         }
         if (item instanceof AgentMessageItem agentMessageItem) {
             return List.of(new HistoryMessageItem(turnId, MessageRole.ASSISTANT, agentMessageItem.text(), agentMessageItem.createdAt()));
@@ -82,8 +90,18 @@ public final class ThreadHistoryMapper {
                     approvalItem.detail(),
                     approvalItem.createdAt()));
         }
+        if (item instanceof ReasoningItem reasoningItem) {
+            return List.of(new HistoryReasoningItem(
+                    turnId,
+                    reasoningItem.summary(),
+                    reasoningItem.detail(),
+                    reasoningItem.createdAt()));
+        }
         if (item instanceof RuntimeErrorItem runtimeErrorItem) {
             return List.of(new HistoryRuntimeErrorItem(turnId, runtimeErrorItem.message(), runtimeErrorItem.createdAt()));
+        }
+        if (item instanceof RawModelOutputItem) {
+            return List.of();
         }
         return List.of();
     }

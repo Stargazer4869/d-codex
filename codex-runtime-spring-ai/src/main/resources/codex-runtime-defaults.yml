@@ -20,6 +20,9 @@ codex:
   model:
     context-window: ${CODEX_CONTEXT_WINDOW:272000}
     auto-compact-token-limit: ${CODEX_AUTO_COMPACT_TOKEN_LIMIT:200000}
+    emit-raw-output-items: ${CODEX_EMIT_RAW_OUTPUT_ITEMS:false}
+    reasoning-effort: ${CODEX_REASONING_EFFORT:}
+    reasoning-summary-mode: ${CODEX_REASONING_SUMMARY_MODE:}
   prompt:
     project-doc-max-bytes: ${CODEX_PROJECT_DOC_MAX_BYTES:32768}
     base-instructions-text: ${CODEX_BASE_INSTRUCTIONS_TEXT:}

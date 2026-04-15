@@ -1,5 +1,6 @@
 package org.dean.codex.core.runtime;
 
+import org.dean.codex.core.model.ModelInputItem;
 import org.dean.codex.protocol.appserver.ThreadForkParams;
 import org.dean.codex.protocol.context.ReconstructedThreadContext;
 import org.dean.codex.protocol.context.ThreadMemory;
@@ -107,6 +108,10 @@ public interface CodexRuntimeGateway {
     List<SkillMetadata> listSkills(boolean forceReload);
 
     RuntimeTurn turnStart(ThreadId threadId, String input);
+
+    default RuntimeTurn turnStart(ThreadId threadId, String input, List<ModelInputItem> inputItems) {
+        return turnStart(threadId, input);
+    }
 
     RuntimeTurn turnResume(ThreadId threadId, TurnId turnId);
 

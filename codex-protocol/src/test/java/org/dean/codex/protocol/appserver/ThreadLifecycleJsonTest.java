@@ -8,7 +8,12 @@ import org.dean.codex.protocol.conversation.ThreadSummary;
 import org.dean.codex.protocol.conversation.ThreadId;
 import org.dean.codex.protocol.conversation.ThreadStatus;
 import org.dean.codex.protocol.conversation.TurnId;
+import org.dean.codex.protocol.conversation.TurnStatus;
 import org.dean.codex.protocol.conversation.ThreadSource;
+import org.dean.codex.protocol.conversation.ItemId;
+import org.dean.codex.protocol.item.ReasoningItem;
+import org.dean.codex.protocol.item.RawModelOutputItem;
+import org.dean.codex.protocol.runtime.RuntimeTurn;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -62,6 +67,17 @@ class ThreadLifecycleJsonTest {
 
         CommandExecTerminateParams commandExecTerminateParams = new CommandExecTerminateParams(new ThreadId("thread-1"), "session-1");
         assertEquals(commandExecTerminateParams, objectMapper.readValue(objectMapper.writeValueAsString(commandExecTerminateParams), CommandExecTerminateParams.class));
+
+        TurnStartParams multimodalTurnStartParams = new TurnStartParams(
+                new ThreadId("thread-1"),
+                "",
+                List.of(
+                        new TurnTextInputItem("Inspect this image"),
+                        new TurnImageInputItem("file:///tmp/screenshot.png", "high")));
+        assertEquals(multimodalTurnStartParams,
+                objectMapper.readValue(objectMapper.writeValueAsString(multimodalTurnStartParams), TurnStartParams.class));
+        assertEquals("[Image] file:///tmp/screenshot.png (detail=high)",
+                new TurnStartParams(new ThreadId("thread-1"), "", List.of(new TurnImageInputItem("file:///tmp/screenshot.png", "high"))).inputSummary());
 
         ThreadStartParams startParams = new ThreadStartParams("App thread", "workspace-write", "review-sensitive");
         assertEquals(startParams, objectMapper.readValue(objectMapper.writeValueAsString(startParams), ThreadStartParams.class));
@@ -180,6 +196,49 @@ class ThreadLifecycleJsonTest {
                 objectMapper.readValue(
                         objectMapper.writeValueAsString(terminalInteractionNotification),
                         CommandExecutionTerminalInteractionNotification.class));
+
+        TurnItemNotification turnItemNotification = new TurnItemNotification(
+                new RuntimeTurn(
+                        new ThreadId("thread-1"),
+                        new TurnId("turn-1"),
+                        TurnStatus.RUNNING,
+                        Instant.parse("2026-04-01T00:00:03Z"),
+                        null),
+                new ReasoningItem(
+                        new ItemId("reasoning-1"),
+                        "Need to inspect README",
+                        "The request mentions setup issues.",
+                        Instant.parse("2026-04-01T00:00:04Z")));
+        assertEquals(turnItemNotification,
+                objectMapper.readValue(
+                        objectMapper.writeValueAsString(turnItemNotification),
+                        TurnItemNotification.class));
+
+        TurnItemNotification rawTurnItemNotification = new TurnItemNotification(
+                new RuntimeTurn(
+                        new ThreadId("thread-1"),
+                        new TurnId("turn-1"),
+                        TurnStatus.RUNNING,
+                        Instant.parse("2026-04-01T00:00:03Z"),
+                        null),
+                new RawModelOutputItem(
+                        new ItemId("raw-1"),
+                        "reasoning",
+                        "resp-item-1",
+                        "stream-1",
+                        1,
+                        "thread-1",
+                        "turn-1",
+                        2,
+                        "response-1",
+                        "session-1",
+                        "completed",
+                        "{\"id\":\"resp-item-1\",\"summary\":\"Need to inspect README\"}",
+                        Instant.parse("2026-04-01T00:00:04Z")));
+        assertEquals(rawTurnItemNotification,
+                objectMapper.readValue(
+                        objectMapper.writeValueAsString(rawTurnItemNotification),
+                        TurnItemNotification.class));
 
         ThreadListResponse listResponse = new ThreadListResponse(
                 List.of(new ThreadSummary(

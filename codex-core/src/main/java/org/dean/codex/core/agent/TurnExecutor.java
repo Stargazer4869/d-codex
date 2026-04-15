@@ -1,10 +1,12 @@
 package org.dean.codex.core.agent;
 
+import org.dean.codex.core.model.ModelInputItem;
 import org.dean.codex.protocol.conversation.ThreadId;
 import org.dean.codex.protocol.conversation.TurnId;
 import org.dean.codex.protocol.event.CodexTurnResult;
 import org.dean.codex.protocol.item.TurnItem;
 
+import java.util.List;
 import java.util.function.Consumer;
 
 public interface TurnExecutor {
@@ -13,6 +15,23 @@ public interface TurnExecutor {
 
     default CodexTurnResult executeTurn(ThreadId threadId, String input, Consumer<TurnItem> itemConsumer) {
         return executeTurn(threadId, input);
+    }
+
+    default CodexTurnResult executeTurn(ThreadId threadId,
+                                        String input,
+                                        List<ModelInputItem> inputItems,
+                                        Consumer<TurnItem> itemConsumer,
+                                        TurnControl turnControl) {
+        return executeTurn(threadId, input, itemConsumer, turnControl);
+    }
+
+    default CodexTurnResult executeTurn(ThreadId threadId,
+                                        TurnId turnId,
+                                        String input,
+                                        List<ModelInputItem> inputItems,
+                                        Consumer<TurnItem> itemConsumer,
+                                        TurnControl turnControl) {
+        return executeTurn(threadId, turnId, input, itemConsumer, turnControl);
     }
 
     default CodexTurnResult executeTurn(ThreadId threadId,

@@ -3,6 +3,9 @@ package org.dean.codex.runtime.springai.runtime;
 import org.dean.codex.core.agent.CodexAgent;
 import org.dean.codex.core.agent.TurnControl;
 import org.dean.codex.core.agent.TurnExecutor;
+import org.dean.codex.core.model.InputImageItem;
+import org.dean.codex.core.model.InputTextItem;
+import org.dean.codex.core.model.ModelInputItem;
 import org.dean.codex.core.conversation.ConversationStore;
 import org.dean.codex.core.history.ThreadHistoryStore;
 import org.dean.codex.protocol.conversation.ItemId;
@@ -13,8 +16,10 @@ import org.dean.codex.protocol.event.CodexTurnResult;
 import org.dean.codex.protocol.history.HistoryMessageItem;
 import org.dean.codex.protocol.history.ThreadHistoryItem;
 import org.dean.codex.protocol.item.AgentMessageItem;
+import org.dean.codex.protocol.item.RawModelOutputItem;
 import org.dean.codex.protocol.item.RuntimeErrorItem;
 import org.dean.codex.protocol.item.TurnItem;
+import org.dean.codex.protocol.item.UserImageItem;
 import org.dean.codex.protocol.item.UserMessageItem;
 import org.dean.codex.runtime.springai.history.ThreadHistoryMapper;
 import org.slf4j.Logger;
@@ -58,6 +63,7 @@ public class DefaultTurnExecutor implements TurnExecutor {
     @Override
     public synchronized CodexTurnResult executeTurn(ThreadId threadId,
                                                     String input,
+                                                    List<ModelInputItem> inputItems,
                                                     Consumer<TurnItem> itemConsumer,
                                                     TurnControl turnControl) {
         if (!conversationStore.exists(threadId)) {
@@ -66,11 +72,40 @@ public class DefaultTurnExecutor implements TurnExecutor {
 
         Instant startedAt = Instant.now();
         TurnId turnId = conversationStore.startTurn(threadId, input, startedAt);
-        logger.debug("turn executor start thread={} turn={} inputChars={}",
+        logger.debug("turn executor start thread={} turn={} inputChars={} inputItems={}",
                 threadId.value(),
                 turnId.value(),
-                input == null ? 0 : input.length());
-        return executeTurn(threadId, turnId, input, itemConsumer, turnControl);
+                input == null ? 0 : input.length(),
+                inputItems == null ? 0 : inputItems.size());
+        return executeTurn(threadId, turnId, input, inputItems, itemConsumer, turnControl);
+    }
+
+    @Override
+    public synchronized CodexTurnResult executeTurn(ThreadId threadId,
+                                                    String input,
+                                                    Consumer<TurnItem> itemConsumer,
+                                                    TurnControl turnControl) {
+        return executeTurn(threadId, input, List.of(), itemConsumer, turnControl);
+    }
+
+    @Override
+    public synchronized CodexTurnResult executeTurn(ThreadId threadId,
+                                                    TurnId turnId,
+                                                    String input,
+                                                    List<ModelInputItem> inputItems,
+                                                    Consumer<TurnItem> itemConsumer,
+                                                    TurnControl turnControl) {
+        if (!conversationStore.exists(threadId)) {
+            throw new IllegalArgumentException("Unknown thread id: " + (threadId == null ? "<null>" : threadId.value()));
+        }
+
+        conversationStore.turn(threadId, turnId);
+        logger.debug("turn executor resume thread={} turn={} inputChars={} inputItems={}",
+                threadId.value(),
+                turnId.value(),
+                input == null ? 0 : input.length(),
+                inputItems == null ? 0 : inputItems.size());
+        return runTurn(threadId, turnId, input, inputItems, itemConsumer, true, turnControl);
     }
 
     @Override
@@ -79,16 +114,7 @@ public class DefaultTurnExecutor implements TurnExecutor {
                                                     String input,
                                                     Consumer<TurnItem> itemConsumer,
                                                     TurnControl turnControl) {
-        if (!conversationStore.exists(threadId)) {
-            throw new IllegalArgumentException("Unknown thread id: " + (threadId == null ? "<null>" : threadId.value()));
-        }
-
-        conversationStore.turn(threadId, turnId);
-        logger.debug("turn executor resume thread={} turn={} inputChars={}",
-                threadId.value(),
-                turnId.value(),
-                input == null ? 0 : input.length());
-        return runTurn(threadId, turnId, input, itemConsumer, true, turnControl);
+        return executeTurn(threadId, turnId, input, List.of(), itemConsumer, turnControl);
     }
 
     @Override
@@ -116,12 +142,13 @@ public class DefaultTurnExecutor implements TurnExecutor {
         }
 
         conversationStore.updateTurnStatus(threadId, turnId, TurnStatus.RUNNING, Instant.now());
-        return runTurn(threadId, turnId, turn.userInput(), itemConsumer, false, turnControl);
+        return runTurn(threadId, turnId, turn.userInput(), List.of(), itemConsumer, false, turnControl);
     }
 
     private CodexTurnResult runTurn(ThreadId threadId,
                                     TurnId turnId,
                                     String input,
+                                    List<ModelInputItem> inputItems,
                                     Consumer<TurnItem> itemConsumer,
                                     boolean includeUserMessageItem,
                                     TurnControl turnControl) {
@@ -133,13 +160,15 @@ public class DefaultTurnExecutor implements TurnExecutor {
         try {
             List<TurnItem> streamedItems = new ArrayList<>();
             AtomicBoolean assistantMessageRecorded = new AtomicBoolean(false);
+            int initialInputItemCount = 0;
             if (includeUserMessageItem) {
-                TurnItem userMessageItem = new UserMessageItem(new ItemId(java.util.UUID.randomUUID().toString()), input, Instant.now());
-                streamedItems.add(userMessageItem);
-                appendTurnItems(threadId, turnId, List.of(userMessageItem));
-                emit(itemConsumer, userMessageItem);
+                List<TurnItem> initialInputItems = createInitialInputItems(input, inputItems);
+                initialInputItemCount = initialInputItems.size();
+                streamedItems.addAll(initialInputItems);
+                appendTurnItems(threadId, turnId, initialInputItems);
+                initialInputItems.forEach(item -> emit(itemConsumer, item));
             }
-            CodexTurnResult result = codexAgent.handleTurn(threadId, turnId, input, item -> {
+            CodexTurnResult result = codexAgent.handleTurn(threadId, turnId, input, inputItems == null ? List.of() : inputItems, item -> {
                 streamedItems.add(item);
                 appendTurnItems(threadId, turnId, List.of(item));
                 if (item instanceof AgentMessageItem) {
@@ -147,7 +176,7 @@ public class DefaultTurnExecutor implements TurnExecutor {
                 }
                 emit(itemConsumer, item);
             }, turnControl == null ? new TurnControl() { } : turnControl);
-            int streamedNonUserCount = Math.max(0, streamedItems.size() - (includeUserMessageItem ? 1 : 0));
+            int streamedNonUserCount = Math.max(0, streamedItems.size() - initialInputItemCount);
             if (streamedNonUserCount < result.items().size()) {
                 List<TurnItem> remainingItems = result.items().subList(streamedNonUserCount, result.items().size());
                 appendTurnItems(threadId, turnId, remainingItems);
@@ -202,9 +231,42 @@ public class DefaultTurnExecutor implements TurnExecutor {
         }
     }
 
+    private List<TurnItem> createInitialInputItems(String input, List<ModelInputItem> inputItems) {
+        List<TurnItem> initialItems = new ArrayList<>();
+        Instant createdAt = Instant.now();
+        if (inputItems != null && !inputItems.isEmpty()) {
+            for (ModelInputItem inputItem : inputItems) {
+                if (inputItem instanceof InputTextItem textItem && !textItem.text().isBlank()) {
+                    initialItems.add(new UserMessageItem(new ItemId(UUID.randomUUID().toString()), textItem.text(), createdAt));
+                }
+                else if (inputItem instanceof InputImageItem imageItem && !imageItem.imageUrl().isBlank()) {
+                    initialItems.add(new UserImageItem(
+                            new ItemId(UUID.randomUUID().toString()),
+                            imageItem.imageUrl(),
+                            imageItem.detail(),
+                            createdAt));
+                }
+            }
+        }
+        if (!initialItems.isEmpty()) {
+            return List.copyOf(initialItems);
+        }
+        return List.of(new UserMessageItem(new ItemId(UUID.randomUUID().toString()), input, createdAt));
+    }
+
     private void appendTurnItems(ThreadId threadId, TurnId turnId, List<TurnItem> items) {
-        conversationStore.appendTurnItems(threadId, turnId, items);
-        appendHistory(threadId, turnId, items);
+        List<TurnItem> persistedItems = items.stream()
+                .filter(this::persistTurnItem)
+                .toList();
+        if (persistedItems.isEmpty()) {
+            return;
+        }
+        conversationStore.appendTurnItems(threadId, turnId, persistedItems);
+        appendHistory(threadId, turnId, persistedItems);
+    }
+
+    private boolean persistTurnItem(TurnItem item) {
+        return !(item instanceof RawModelOutputItem);
     }
 
     private void appendHistory(ThreadId threadId, TurnId turnId, List<? extends TurnItem> items) {

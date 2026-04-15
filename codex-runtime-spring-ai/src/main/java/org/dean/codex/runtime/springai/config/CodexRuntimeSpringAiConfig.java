@@ -6,6 +6,8 @@ import org.dean.codex.core.context.ContextManager;
 import org.dean.codex.core.context.ThreadContextReconstructionService;
 import org.dean.codex.core.conversation.ConversationStore;
 import org.dean.codex.core.history.ThreadHistoryStore;
+import org.dean.codex.core.model.ResponsesCompactClient;
+import org.dean.codex.core.model.ResponsesModelClient;
 import org.dean.codex.core.skill.SkillService;
 import org.dean.codex.core.tool.local.CommandApprovalPolicy;
 import org.dean.codex.core.tool.local.WebSearchBackend;
@@ -16,8 +18,12 @@ import org.dean.codex.runtime.springai.approval.FileSystemCommandApprovalStore;
 import org.dean.codex.runtime.springai.context.FileSystemContextManager;
 import org.dean.codex.runtime.springai.context.SpringAiThreadCompactionSummarizer;
 import org.dean.codex.runtime.springai.context.ThreadCompactionSummarizer;
+import org.dean.codex.runtime.springai.model.ChatClientResponsesCompactClient;
 import org.dean.codex.runtime.springai.conversation.FileSystemConversationStore;
 import org.dean.codex.runtime.springai.history.FileSystemThreadHistoryStore;
+import org.dean.codex.runtime.springai.model.ChatClientResponsesModelClient;
+import org.dean.codex.runtime.springai.model.FileSystemThreadModelSessionStateStore;
+import org.dean.codex.runtime.springai.model.ThreadModelSessionStateStore;
 import org.dean.codex.runtime.springai.prompt.BaseInstructionsResolver;
 import org.dean.codex.runtime.springai.prompt.DefaultBaseInstructionsResolver;
 import org.dean.codex.runtime.springai.prompt.DefaultPromptAssemblyService;
@@ -110,8 +116,24 @@ public class CodexRuntimeSpringAiConfig {
     }
 
     @Bean
-    public ThreadCompactionSummarizer threadCompactionSummarizer(ChatClient.Builder chatClientBuilder) {
-        return new SpringAiThreadCompactionSummarizer(chatClientBuilder);
+    public ResponsesCompactClient responsesCompactClient(ChatClient.Builder chatClientBuilder) {
+        return new ChatClientResponsesCompactClient(chatClientBuilder);
+    }
+
+    @Bean
+    public ThreadCompactionSummarizer threadCompactionSummarizer(ResponsesCompactClient responsesCompactClient) {
+        return new SpringAiThreadCompactionSummarizer(responsesCompactClient);
+    }
+
+    @Bean
+    public ResponsesModelClient responsesModelClient(ChatClient.Builder chatClientBuilder) {
+        return new ChatClientResponsesModelClient(chatClientBuilder);
+    }
+
+    @Bean
+    public ThreadModelSessionStateStore threadModelSessionStateStore(ConversationStore conversationStore,
+                                                                     @org.springframework.beans.factory.annotation.Qualifier("codexStorageRoot") Path storageRoot) {
+        return new FileSystemThreadModelSessionStateStore(conversationStore, storageRoot);
     }
 
     @Bean

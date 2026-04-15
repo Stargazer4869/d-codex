@@ -104,6 +104,8 @@ import org.dean.codex.protocol.item.ToolCallItem;
 import org.dean.codex.protocol.item.ToolResultItem;
 import org.dean.codex.protocol.item.CollabToolCallItem;
 import org.dean.codex.protocol.item.CollabToolCallStatus;
+import org.dean.codex.protocol.item.RawModelOutputItem;
+import org.dean.codex.protocol.item.ReasoningItem;
 import org.dean.codex.protocol.tool.CommandApprovalDecision;
 import org.dean.codex.protocol.tool.ShellCommandResult;
 import org.dean.codex.runtime.springai.thread.DefaultThreadCatalogService;
@@ -334,6 +336,32 @@ class CodexConsoleRunnerTest {
         assertTrue(captured.stdout().contains("[command] completed session=exec-ses"));
         assertTrue(captured.stdout().contains("status=COMPLETED"));
         assertTrue(captured.stdout().contains("exitCode=0"));
+    }
+
+    @Test
+    void streamedReasoningItemsAreRenderedClearly() throws Exception {
+        StubAppServer runtime = new StubAppServer(true, false, false, false, false, true, false, false, true);
+        CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());
+
+        CapturedRun captured = captureRun(() -> runner.run(), "inspect repo\n");
+
+        assertTrue(captured.stdout().contains("[reasoning] Need to inspect README"));
+        assertTrue(captured.stdout().contains("The request mentions setup issues."));
+    }
+
+    @Test
+    void rawModelOutputItemsAreRenderedClearly() throws Exception {
+        StubAppServer runtime = new StubAppServer();
+        runtime.emitRawModelOutputActivity = true;
+        CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());
+
+        CapturedRun captured = captureRun(() -> runner.run(), "inspect repo\n");
+
+        assertTrue(captured.stdout().contains("[model:raw] reasoning id=resp-item-1"));
+        assertTrue(captured.stdout().contains("stream=stream-1"));
+        assertTrue(captured.stdout().contains("seq=1"));
+        assertTrue(captured.stdout().contains("response=response-1"));
+        assertTrue(captured.stdout().contains("Need to inspect README"));
     }
 
     @Test
@@ -757,6 +785,8 @@ class CodexConsoleRunnerTest {
         private final boolean delayedTurnResumeCompletion;
         private final boolean steerAccepted;
         private final boolean completeOnSteerFailure;
+        private final boolean emitReasoningActivity;
+        private boolean emitRawModelOutputActivity;
         private final Set<TurnId> runningTurnIds = ConcurrentHashMap.newKeySet();
         private final CopyOnWriteArrayList<String> steeredInputs = new CopyOnWriteArrayList<>();
         private final CopyOnWriteArrayList<ThreadListParams> threadListCalls = new CopyOnWriteArrayList<>();
@@ -790,7 +820,7 @@ class CodexConsoleRunnerTest {
                               boolean steerAccepted,
                               boolean completeOnSteerFailure) {
             this(preloadThreadsAsLoaded, failResumeForExistingThreads, emitToolActivity, emitCommandExecutionNotifications, delayedTurnCompletion,
-                    steerAccepted, completeOnSteerFailure, false);
+                    steerAccepted, completeOnSteerFailure, false, false);
         }
 
         private StubAppServer(boolean preloadThreadsAsLoaded,
@@ -801,6 +831,26 @@ class CodexConsoleRunnerTest {
                               boolean steerAccepted,
                               boolean completeOnSteerFailure,
                               boolean delayedTurnResumeCompletion) {
+            this(preloadThreadsAsLoaded,
+                    failResumeForExistingThreads,
+                    emitToolActivity,
+                    emitCommandExecutionNotifications,
+                    delayedTurnCompletion,
+                    steerAccepted,
+                    completeOnSteerFailure,
+                    delayedTurnResumeCompletion,
+                    false);
+        }
+
+        private StubAppServer(boolean preloadThreadsAsLoaded,
+                              boolean failResumeForExistingThreads,
+                              boolean emitToolActivity,
+                              boolean emitCommandExecutionNotifications,
+                              boolean delayedTurnCompletion,
+                              boolean steerAccepted,
+                              boolean completeOnSteerFailure,
+                              boolean delayedTurnResumeCompletion,
+                              boolean emitReasoningActivity) {
             this.rootThreadId = store.createThread("Thread 1");
             this.subagentThreadId = store.createThread("Worker thread");
             this.failResumeForExistingThreads = failResumeForExistingThreads;
@@ -810,6 +860,7 @@ class CodexConsoleRunnerTest {
             this.delayedTurnResumeCompletion = delayedTurnResumeCompletion;
             this.steerAccepted = steerAccepted;
             this.completeOnSteerFailure = completeOnSteerFailure;
+            this.emitReasoningActivity = emitReasoningActivity;
             if (preloadThreadsAsLoaded) {
                 loadedThreadIds.add(rootThreadId);
                 loadedThreadIds.add(subagentThreadId);
@@ -1346,6 +1397,37 @@ class CodexConsoleRunnerTest {
                     publish(threadId, new org.dean.codex.protocol.appserver.TurnItemNotification(
                             runningTurn,
                             new ToolResultItem(new ItemId("tool-result-1"), "RUN_COMMAND", "success=true exitCode=0", now.plusMillis(2))));
+                }
+                if (emitReasoningActivity) {
+                    RuntimeTurn runningTurn = new RuntimeTurn(threadId, turnId, TurnStatus.RUNNING, now, null);
+                    publish(threadId, new TurnStartedNotification(runningTurn));
+                    publish(threadId, new org.dean.codex.protocol.appserver.TurnItemNotification(
+                            runningTurn,
+                            new ReasoningItem(
+                                    new ItemId("reasoning-1"),
+                                    "Need to inspect README",
+                                    "The request mentions setup issues.",
+                                    now.plusMillis(1))));
+                }
+                if (emitRawModelOutputActivity) {
+                    RuntimeTurn runningTurn = new RuntimeTurn(threadId, turnId, TurnStatus.RUNNING, now, null);
+                    publish(threadId, new TurnStartedNotification(runningTurn));
+                    publish(threadId, new org.dean.codex.protocol.appserver.TurnItemNotification(
+                            runningTurn,
+                            new RawModelOutputItem(
+                                    new ItemId("raw-1"),
+                                    "reasoning",
+                                    "resp-item-1",
+                                    "stream-1",
+                                    1,
+                                    threadId.value(),
+                                    turnId.value(),
+                                    1,
+                                    "response-1",
+                                    "session-1",
+                                    "completed",
+                                    "{\"id\":\"resp-item-1\",\"summary\":\"Need to inspect README\"}",
+                                    now.plusMillis(1))));
                 }
                 if (emitCommandExecutionNotifications) {
                     CommandExecutionEvent commandExecution = new CommandExecutionEvent(

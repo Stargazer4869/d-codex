@@ -17,6 +17,9 @@ class CodexRuntimeDefaultsTest {
         assertTrue(yaml.contains("log-prompt: ${CODEX_CHAT_LOG_PROMPT:false}"));
         assertTrue(yaml.contains("log-completion: ${CODEX_CHAT_LOG_COMPLETION:false}"));
         assertTrue(yaml.contains("project-doc-max-bytes: ${CODEX_PROJECT_DOC_MAX_BYTES:32768}"));
+        assertTrue(yaml.contains("emit-raw-output-items: ${CODEX_EMIT_RAW_OUTPUT_ITEMS:false}"));
+        assertTrue(yaml.contains("reasoning-effort: ${CODEX_REASONING_EFFORT:}"));
+        assertTrue(yaml.contains("reasoning-summary-mode: ${CODEX_REASONING_SUMMARY_MODE:}"));
         assertTrue(yaml.contains("base-instructions-text: ${CODEX_BASE_INSTRUCTIONS_TEXT:}"));
         assertTrue(yaml.contains("base-instructions-file: ${CODEX_BASE_INSTRUCTIONS_FILE:}"));
         assertTrue(yaml.contains("project-instructions-text: ${CODEX_PROJECT_INSTRUCTIONS_TEXT:}"));

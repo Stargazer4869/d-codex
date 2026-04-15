@@ -18,9 +18,12 @@ public class DefaultToolContractResolver implements ToolContractResolver {
 
     @Override
     public ResolvedToolContract resolvePlannerToolContract() {
-        List<ResolvedToolDefinition> visibleTools = toolCapabilityRegistry.plannerToolCapabilities().stream()
+        List<ToolCapability> capabilities = toolCapabilityRegistry.plannerToolCapabilities();
+        List<ResolvedToolDefinition> visibleTools = capabilities.stream()
                 .map(ToolCapability::definition)
                 .toList();
-        return new ResolvedToolContract(visibleTools, false);
+        boolean supportsParallelToolCalls = capabilities.stream()
+                .anyMatch(ToolCapability::supportsParallelExecution);
+        return new ResolvedToolContract(visibleTools, supportsParallelToolCalls);
     }
 }

@@ -4,6 +4,7 @@ import jakarta.annotation.PreDestroy;
 import org.dean.codex.core.agent.AgentControl;
 import org.dean.codex.core.agent.TurnControl;
 import org.dean.codex.core.agent.TurnExecutor;
+import org.dean.codex.core.model.ModelInputItem;
 import org.dean.codex.core.context.ContextManager;
 import org.dean.codex.core.context.ThreadContextReconstructionService;
 import org.dean.codex.core.conversation.ConversationStore;
@@ -22,6 +23,7 @@ import org.dean.codex.core.skill.SkillService;
 import org.dean.codex.protocol.conversation.ConversationTurn;
 import org.dean.codex.protocol.conversation.ThreadActiveFlag;
 import org.dean.codex.protocol.conversation.ThreadId;
+import org.dean.codex.protocol.conversation.ThreadModelSessionSummary;
 import org.dean.codex.protocol.conversation.ThreadPromptStateSummary;
 import org.dean.codex.protocol.conversation.ThreadStatus;
 import org.dean.codex.protocol.conversation.ThreadSummary;
@@ -37,6 +39,8 @@ import org.dean.codex.protocol.history.HistoryCompactionSummaryItem;
 import org.dean.codex.protocol.history.ThreadHistoryItem;
 import org.dean.codex.runtime.springai.config.CodexProperties;
 import org.dean.codex.runtime.springai.history.ThreadHistoryReplay;
+import org.dean.codex.runtime.springai.model.ThreadModelSessionSnapshot;
+import org.dean.codex.runtime.springai.model.ThreadModelSessionStateStore;
 import org.dean.codex.runtime.springai.prompt.ThreadPromptSnapshot;
 import org.dean.codex.runtime.springai.prompt.ThreadPromptSnapshotResolver;
 import org.dean.codex.runtime.springai.prompt.ThreadPromptStateStore;
@@ -75,6 +79,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
     private final SkillService skillService;
     private final ThreadPromptStateStore threadPromptStateStore;
     private final ThreadPromptSnapshotResolver threadPromptSnapshotResolver;
+    private final ThreadModelSessionStateStore threadModelSessionStateStore;
     private final int maxAgentDepth;
     private final ExecutorService turnExecutionPool;
     private final Map<ThreadId, CopyOnWriteArrayList<Consumer<RuntimeNotification>>> subscribers = new ConcurrentHashMap<>();
@@ -98,6 +103,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
                 skillService,
                 null,
                 null,
+                null,
                 DEFAULT_MAX_AGENT_DEPTH);
     }
 
@@ -115,6 +121,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
                 skillService,
                 null,
                 null,
+                null,
                 DEFAULT_MAX_AGENT_DEPTH);
     }
 
@@ -133,6 +140,28 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
                 skillService,
                 null,
                 null,
+                null,
+                maxAgentDepth);
+    }
+
+    public DefaultCodexRuntimeGateway(ConversationStore conversationStore,
+                                      TurnExecutor turnExecutor,
+                                      ContextManager contextManager,
+                                      ThreadContextReconstructionService threadContextReconstructionService,
+                                      ThreadHistoryStore threadHistoryStore,
+                                      SkillService skillService,
+                                      ThreadPromptStateStore threadPromptStateStore,
+                                      ThreadPromptSnapshotResolver threadPromptSnapshotResolver,
+                                      int maxAgentDepth) {
+        this(conversationStore,
+                turnExecutor,
+                contextManager,
+                threadContextReconstructionService,
+                threadHistoryStore,
+                skillService,
+                threadPromptStateStore,
+                threadPromptSnapshotResolver,
+                null,
                 maxAgentDepth);
     }
 
@@ -145,6 +174,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
                                       SkillService skillService,
                                       ThreadPromptStateStore threadPromptStateStore,
                                       ThreadPromptSnapshotResolver threadPromptSnapshotResolver,
+                                      ThreadModelSessionStateStore threadModelSessionStateStore,
                                       CodexProperties codexProperties) {
         this(conversationStore,
                 turnExecutor,
@@ -154,6 +184,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
                 skillService,
                 threadPromptStateStore,
                 threadPromptSnapshotResolver,
+                threadModelSessionStateStore,
                 codexProperties == null ? DEFAULT_MAX_AGENT_DEPTH : codexProperties.getAgent().getMaxDepth());
     }
 
@@ -165,6 +196,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
                                       SkillService skillService,
                                       ThreadPromptStateStore threadPromptStateStore,
                                       ThreadPromptSnapshotResolver threadPromptSnapshotResolver,
+                                      ThreadModelSessionStateStore threadModelSessionStateStore,
                                       int maxAgentDepth) {
         this.conversationStore = conversationStore;
         this.turnExecutor = turnExecutor;
@@ -174,6 +206,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
         this.skillService = skillService;
         this.threadPromptStateStore = threadPromptStateStore;
         this.threadPromptSnapshotResolver = threadPromptSnapshotResolver;
+        this.threadModelSessionStateStore = threadModelSessionStateStore;
         this.maxAgentDepth = Math.max(0, maxAgentDepth);
         this.turnExecutionPool = Executors.newCachedThreadPool(runnable -> {
             Thread thread = new Thread(runnable);
@@ -188,6 +221,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
         ThreadId threadId = conversationStore.createThread(title);
         conversationStore.updateThreadMetadata(threadId, null, null, null, null, null, null, null, null, null);
         persistPromptSnapshot(threadId);
+        persistModelSessionSnapshot(threadId);
         markThreadLoaded(threadId);
         invalidateThreadCatalog(threadId);
         ThreadSummary summary = threadSummary(threadId);
@@ -200,6 +234,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
         requireThread(threadId);
         requireNotArchived(threadId);
         persistPromptSnapshotsForThreadTree(threadTreeRoot(threadId));
+        persistModelSessionSnapshotsForThreadTree(threadTreeRoot(threadId));
         markThreadTreeLoaded(threadTreeRoot(threadId));
         invalidateThreadCatalog(threadId);
         ThreadSummary summary = threadSummary(threadId);
@@ -284,7 +319,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
             threadHistoryStore.replace(childThreadId, threadHistoryStore.read(request.parentThreadId()));
         }
         copyPromptSnapshot(request.parentThreadId(), childThreadId);
-        conversationStore.updateAgentThread(
+        ThreadSummary childSummary = conversationStore.updateAgentThread(
                 childThreadId,
                 request.parentThreadId(),
                 childDepth,
@@ -292,6 +327,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
                 request.nickname(),
                 request.role(),
                 request.taskName());
+        copyModelSessionSnapshot(request.parentThreadId(), childSummary.threadId(), childSummary);
         markThreadLoaded(childThreadId);
         invalidateThreadCatalog(childThreadId);
         enqueueAgentInput(childThreadId, new AgentMessage(
@@ -506,6 +542,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
             threadHistoryStore.replace(forkedThreadId, threadHistoryStore.read(params.threadId()));
         }
         copyPromptSnapshot(params.threadId(), forkedThreadId);
+        copyModelSessionSnapshot(params.threadId(), forkedThreadId);
         markThreadLoaded(forkedThreadId);
         invalidateThreadCatalog(forkedThreadId);
         return threadSummary(forkedThreadId);
@@ -642,6 +679,11 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
 
     @Override
     public RuntimeTurn turnStart(ThreadId threadId, String input) {
+        return turnStart(threadId, input, List.of());
+    }
+
+    @Override
+    public RuntimeTurn turnStart(ThreadId threadId, String input, List<ModelInputItem> inputItems) {
         requireThread(threadId);
         requireLoadedThread(threadId);
         Instant startedAt = Instant.now();
@@ -652,7 +694,8 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
 
         RuntimeTurn runtimeTurn = new RuntimeTurn(threadId, turnId, TurnStatus.RUNNING, startedAt, null);
         publish(notification(RuntimeNotificationType.TURN_STARTED, threadId, turnId, null, runtimeTurn, null, TurnStatus.RUNNING, null));
-        turnExecutionPool.submit(() -> executeStartedTurn(runningTurn, input));
+        List<ModelInputItem> safeInputItems = inputItems == null ? List.of() : List.copyOf(inputItems);
+        turnExecutionPool.submit(() -> executeStartedTurn(runningTurn, input, safeInputItems));
         return runtimeTurn;
     }
 
@@ -713,12 +756,13 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
         turnExecutionPool.shutdownNow();
     }
 
-    private void executeStartedTurn(RunningTurn runningTurn, String input) {
+    private void executeStartedTurn(RunningTurn runningTurn, String input, List<ModelInputItem> inputItems) {
         try {
             CodexTurnResult result = turnExecutor.executeTurn(
                     runningTurn.threadId(),
                     runningTurn.turnId(),
                     input,
+                    inputItems,
                     item -> publish(turnItemNotification(runningTurn, item)),
                     runningTurn);
             publishCompletion(runningTurn, result);
@@ -847,6 +891,13 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
         threadPromptStateStore.writeIfAbsent(threadId, threadPromptSnapshotResolver.resolveCurrentSnapshot());
     }
 
+    private void persistModelSessionSnapshot(ThreadId threadId) {
+        if (threadModelSessionStateStore == null || threadId == null) {
+            return;
+        }
+        threadModelSessionStateStore.writeIfAbsent(threadId, ThreadModelSessionSnapshot.initial(storedThreadSummary(threadId)));
+    }
+
     private void persistPromptSnapshotsForThreadTree(ThreadId rootThreadId) {
         if (threadPromptStateStore == null || threadPromptSnapshotResolver == null || rootThreadId == null) {
             return;
@@ -871,6 +922,30 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
         }
     }
 
+    private void persistModelSessionSnapshotsForThreadTree(ThreadId rootThreadId) {
+        if (threadModelSessionStateStore == null || rootThreadId == null) {
+            return;
+        }
+        List<ThreadSummary> summaries = conversationStore.listThreads();
+        Map<ThreadId, ThreadSummary> byId = summaries.stream()
+                .collect(java.util.stream.Collectors.toMap(ThreadSummary::threadId, threadSummary -> threadSummary));
+        List<ThreadSummary> threadTree = summaries.stream()
+                .filter(summary -> belongsToThreadTree(summary, rootThreadId, byId))
+                .sorted(threadTreeComparator(rootThreadId))
+                .toList();
+        for (ThreadSummary summary : threadTree) {
+            if (threadModelSessionStateStore.read(summary.threadId()).isPresent()) {
+                continue;
+            }
+            ThreadModelSessionSnapshot snapshot = summary.parentThreadId() == null
+                    ? ThreadModelSessionSnapshot.initial(summary)
+                    : threadModelSessionStateStore.read(summary.parentThreadId())
+                    .map(parentSnapshot -> parentSnapshot.inheritedFrom(summary.parentThreadId(), summary))
+                    .orElseGet(() -> ThreadModelSessionSnapshot.initial(summary));
+            threadModelSessionStateStore.write(summary.threadId(), snapshot);
+        }
+    }
+
     private void copyPromptSnapshot(ThreadId sourceThreadId, ThreadId targetThreadId) {
         if (threadPromptStateStore == null || threadPromptSnapshotResolver == null || targetThreadId == null) {
             return;
@@ -884,6 +959,24 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
         threadPromptStateStore.write(targetThreadId, targetSnapshot);
     }
 
+    private void copyModelSessionSnapshot(ThreadId sourceThreadId, ThreadId targetThreadId) {
+        copyModelSessionSnapshot(sourceThreadId, targetThreadId, storedThreadSummary(targetThreadId));
+    }
+
+    private void copyModelSessionSnapshot(ThreadId sourceThreadId, ThreadId targetThreadId, ThreadSummary targetSummary) {
+        if (threadModelSessionStateStore == null || targetThreadId == null) {
+            return;
+        }
+        ThreadModelSessionSnapshot sourceSnapshot = sourceThreadId == null
+                ? ThreadModelSessionSnapshot.initial(targetSummary)
+                : threadModelSessionStateStore.read(sourceThreadId)
+                .orElseGet(() -> ThreadModelSessionSnapshot.initial(storedThreadSummary(sourceThreadId)));
+        ThreadModelSessionSnapshot targetSnapshot = sourceThreadId == null
+                ? sourceSnapshot
+                : sourceSnapshot.inheritedFrom(sourceThreadId, targetSummary);
+        threadModelSessionStateStore.write(targetThreadId, targetSnapshot);
+    }
+
     private ThreadSummary storedThreadSummary(ThreadId threadId) {
         return conversationStore.listThreads().stream()
                 .filter(summary -> summary.threadId().equals(threadId))
@@ -892,10 +985,12 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
     }
 
     private ThreadSummary runtimeThreadSummary(ThreadSummary summary) {
-        ThreadSummary summaryWithPromptState = summary.withPromptState(promptState(summary.threadId()));
+        ThreadSummary summaryWithState = summary
+                .withPromptState(promptState(summary.threadId()))
+                .withModelSessionState(modelSessionState(summary.threadId()));
         AgentStatus runtimeAgentStatus = runtimeAgentStatus(summary, false, false);
         if (!loadedThreadIds.contains(summary.threadId())) {
-            return summaryWithPromptState.withRuntime(ThreadStatus.NOT_LOADED, List.of(), runtimeAgentStatus);
+            return summaryWithState.withRuntime(ThreadStatus.NOT_LOADED, List.of(), runtimeAgentStatus);
         }
         List<ConversationTurn> turns = conversationStore.turns(summary.threadId());
         List<ThreadActiveFlag> activeFlags = new ArrayList<>();
@@ -911,10 +1006,10 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
                 activeFlags.add(ThreadActiveFlag.WAITING_ON_APPROVAL);
             }
         }
-        return summaryWithPromptState.withRuntime(
+        return summaryWithState.withRuntime(
                 active ? ThreadStatus.ACTIVE : ThreadStatus.IDLE,
                 activeFlags,
-                runtimeAgentStatus(summaryWithPromptState, active, waitingOnApproval));
+                runtimeAgentStatus(summaryWithState, active, waitingOnApproval));
     }
 
     private ThreadPromptStateSummary promptState(ThreadId threadId) {
@@ -926,6 +1021,15 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
                         snapshot.persistedAt(),
                         snapshot.inheritedFromThreadId(),
                         snapshot.userInstructions().size()))
+                .orElse(null);
+    }
+
+    private ThreadModelSessionSummary modelSessionState(ThreadId threadId) {
+        if (threadModelSessionStateStore == null || threadId == null) {
+            return null;
+        }
+        return threadModelSessionStateStore.read(threadId)
+                .map(ThreadModelSessionSnapshot::toSummary)
                 .orElse(null);
     }
 

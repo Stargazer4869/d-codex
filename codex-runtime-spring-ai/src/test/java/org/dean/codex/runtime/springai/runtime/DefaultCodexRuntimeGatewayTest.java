@@ -40,6 +40,8 @@ import org.dean.codex.protocol.skill.SkillScope;
 import org.dean.codex.runtime.springai.context.DefaultThreadContextReconstructionService;
 import org.dean.codex.runtime.springai.history.InMemoryThreadHistoryStore;
 import org.dean.codex.runtime.springai.history.ThreadHistoryMapper;
+import org.dean.codex.runtime.springai.model.ThreadModelSessionSnapshot;
+import org.dean.codex.runtime.springai.model.ThreadModelSessionStateStore;
 import org.dean.codex.runtime.springai.prompt.ThreadPromptSnapshot;
 import org.dean.codex.runtime.springai.prompt.ThreadPromptStateStore;
 import org.junit.jupiter.api.Test;
@@ -225,6 +227,7 @@ class DefaultCodexRuntimeGatewayTest {
     void threadStartPersistsCurrentPromptSnapshotAndForkCopiesIt() {
         ConversationStore store = new InMemoryConversationStore();
         InMemoryThreadPromptStateStore promptStateStore = new InMemoryThreadPromptStateStore();
+        InMemoryThreadModelSessionStateStore modelSessionStateStore = new InMemoryThreadModelSessionStateStore();
         ThreadPromptSnapshot snapshot = new ThreadPromptSnapshot(
                 "Base instructions",
                 List.of("Project instructions:\nStay focused."),
@@ -238,6 +241,7 @@ class DefaultCodexRuntimeGatewayTest {
                 new NoOpSkillService(),
                 promptStateStore,
                 () -> snapshot,
+                modelSessionStateStore,
                 4);
 
         ThreadSummary started = gateway.threadStart("Prompt thread");
@@ -263,12 +267,19 @@ class DefaultCodexRuntimeGatewayTest {
         org.junit.jupiter.api.Assertions.assertNull(started.promptState().inheritedFromThreadId());
         assertNotNull(forked.promptState());
         assertEquals(started.threadId(), forked.promptState().inheritedFromThreadId());
+        assertNotNull(started.modelSessionState());
+        assertEquals(started.threadId(), started.modelSessionState().rootThreadId());
+        org.junit.jupiter.api.Assertions.assertNull(started.modelSessionState().inheritedFromThreadId());
+        assertNotNull(forked.modelSessionState());
+        assertEquals(started.threadId(), forked.modelSessionState().inheritedFromThreadId());
+        assertEquals(started.threadId(), forked.modelSessionState().rootThreadId());
     }
 
     @Test
     void spawnAgentCopiesParentPromptSnapshotToChild() {
         ConversationStore store = new InMemoryConversationStore();
         InMemoryThreadPromptStateStore promptStateStore = new InMemoryThreadPromptStateStore();
+        InMemoryThreadModelSessionStateStore modelSessionStateStore = new InMemoryThreadModelSessionStateStore();
         DefaultCodexRuntimeGateway gateway = new DefaultCodexRuntimeGateway(
                 store,
                 new CompletingTurnExecutor(store),
@@ -281,6 +292,7 @@ class DefaultCodexRuntimeGatewayTest {
                         "Base instructions",
                         List.of("Project instructions:\nStay focused."),
                         Instant.parse("2026-04-09T00:00:00Z")),
+                modelSessionStateStore,
                 4);
         ThreadSummary parent = gateway.threadStart("Parent thread");
         ThreadPromptSnapshot snapshot = promptStateStore.read(parent.threadId()).orElseThrow();
@@ -306,6 +318,52 @@ class DefaultCodexRuntimeGatewayTest {
                 .orElseThrow();
         assertNotNull(childSummary.promptState());
         assertEquals(parent.threadId(), childSummary.promptState().inheritedFromThreadId());
+        assertNotNull(childSummary.modelSessionState());
+        assertEquals(parent.threadId(), childSummary.modelSessionState().inheritedFromThreadId());
+        assertEquals(parent.threadId(), childSummary.modelSessionState().rootThreadId());
+        assertEquals(parent.threadId(), childSummary.modelSessionState().parentThreadId());
+        assertEquals("worker-task", childSummary.modelSessionState().agentPath());
+    }
+
+    @Test
+    void threadResumeBackfillsMissingModelSessionSnapshotsAcrossThreadTree() {
+        ConversationStore store = new InMemoryConversationStore();
+        InMemoryThreadModelSessionStateStore modelSessionStateStore = new InMemoryThreadModelSessionStateStore();
+        ThreadId parentThreadId = store.createThread("Parent thread");
+        ThreadId childThreadId = store.forkThread(new ThreadForkParams(
+                parentThreadId,
+                "Child thread",
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null));
+        store.updateAgentThread(childThreadId, parentThreadId, 1, null, "worker-1", "worker", "root/worker-1");
+
+        DefaultCodexRuntimeGateway gateway = new DefaultCodexRuntimeGateway(
+                store,
+                new CompletingTurnExecutor(store),
+                new NoOpContextManager(),
+                new NoOpThreadContextReconstructionService(),
+                null,
+                new NoOpSkillService(),
+                null,
+                null,
+                modelSessionStateStore,
+                4);
+
+        gateway.threadResume(parentThreadId);
+
+        ThreadModelSessionSnapshot parentSnapshot = modelSessionStateStore.read(parentThreadId).orElseThrow();
+        ThreadModelSessionSnapshot childSnapshot = modelSessionStateStore.read(childThreadId).orElseThrow();
+        assertEquals(parentThreadId, parentSnapshot.rootThreadId());
+        assertEquals(parentThreadId, childSnapshot.inheritedFromThreadId());
+        assertEquals(parentThreadId, childSnapshot.rootThreadId());
+        assertEquals(parentThreadId, childSnapshot.parentThreadId());
+        assertEquals("root/worker-1", childSnapshot.agentPath());
     }
 
     @Test
@@ -1102,6 +1160,22 @@ class DefaultCodexRuntimeGatewayTest {
 
         @Override
         public ThreadPromptSnapshot write(ThreadId threadId, ThreadPromptSnapshot snapshot) {
+            snapshots.put(threadId, snapshot);
+            return snapshot;
+        }
+    }
+
+    private static final class InMemoryThreadModelSessionStateStore implements ThreadModelSessionStateStore {
+
+        private final java.util.Map<ThreadId, ThreadModelSessionSnapshot> snapshots = new java.util.HashMap<>();
+
+        @Override
+        public Optional<ThreadModelSessionSnapshot> read(ThreadId threadId) {
+            return Optional.ofNullable(snapshots.get(threadId));
+        }
+
+        @Override
+        public ThreadModelSessionSnapshot write(ThreadId threadId, ThreadModelSessionSnapshot snapshot) {
             snapshots.put(threadId, snapshot);
             return snapshot;
         }

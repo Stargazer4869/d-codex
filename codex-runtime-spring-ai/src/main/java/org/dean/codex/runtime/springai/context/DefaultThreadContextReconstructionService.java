@@ -15,8 +15,10 @@ import org.dean.codex.protocol.conversation.ThreadId;
 import org.dean.codex.protocol.history.HistoryApprovalItem;
 import org.dean.codex.protocol.history.HistoryCompactionSummaryItem;
 import org.dean.codex.protocol.history.HistoryCollabToolCallItem;
+import org.dean.codex.protocol.history.HistoryImageItem;
 import org.dean.codex.protocol.history.HistoryMessageItem;
 import org.dean.codex.protocol.history.HistoryPlanItem;
+import org.dean.codex.protocol.history.HistoryReasoningItem;
 import org.dean.codex.protocol.history.HistoryRuntimeErrorItem;
 import org.dean.codex.protocol.history.HistorySkillUseItem;
 import org.dean.codex.protocol.history.HistoryToolCallItem;
@@ -26,11 +28,13 @@ import org.dean.codex.protocol.item.AgentMessageItem;
 import org.dean.codex.protocol.item.ApprovalItem;
 import org.dean.codex.protocol.item.CollabToolCallItem;
 import org.dean.codex.protocol.item.PlanItem;
+import org.dean.codex.protocol.item.ReasoningItem;
 import org.dean.codex.protocol.item.RuntimeErrorItem;
 import org.dean.codex.protocol.item.SkillUseItem;
 import org.dean.codex.protocol.item.ToolCallItem;
 import org.dean.codex.protocol.item.ToolResultItem;
 import org.dean.codex.protocol.item.TurnItem;
+import org.dean.codex.protocol.item.UserImageItem;
 import org.dean.codex.protocol.item.UserMessageItem;
 import org.dean.codex.runtime.springai.history.ThreadHistoryReplay;
 
@@ -313,6 +317,9 @@ public class DefaultThreadContextReconstructionService implements ThreadContextR
         if (item instanceof UserMessageItem userMessageItem) {
             return userMessageItem.createdAt();
         }
+        if (item instanceof UserImageItem userImageItem) {
+            return userImageItem.createdAt();
+        }
         if (item instanceof AgentMessageItem agentMessageItem) {
             return agentMessageItem.createdAt();
         }
@@ -331,6 +338,9 @@ public class DefaultThreadContextReconstructionService implements ThreadContextR
         if (item instanceof ApprovalItem approvalItem) {
             return approvalItem.createdAt();
         }
+        if (item instanceof ReasoningItem reasoningItem) {
+            return reasoningItem.createdAt();
+        }
         if (item instanceof RuntimeErrorItem runtimeErrorItem) {
             return runtimeErrorItem.createdAt();
         }
@@ -344,6 +354,9 @@ public class DefaultThreadContextReconstructionService implements ThreadContextR
     private String summarizeHistoryItem(ThreadHistoryItem item) {
         if (item instanceof HistoryMessageItem historyMessageItem) {
             return historyMessageItem.role().name().toLowerCase() + ": " + historyMessageItem.text();
+        }
+        if (item instanceof HistoryImageItem historyImageItem) {
+            return "userImage: " + imageSummary(historyImageItem.imageUrl(), historyImageItem.detail());
         }
         if (item instanceof HistoryPlanItem historyPlanItem) {
             if (historyPlanItem.plan() == null || historyPlanItem.plan().edits().isEmpty()) {
@@ -376,6 +389,10 @@ public class DefaultThreadContextReconstructionService implements ThreadContextR
         if (item instanceof HistoryApprovalItem historyApprovalItem) {
             return "approval: " + historyApprovalItem.state() + " " + historyApprovalItem.detail();
         }
+        if (item instanceof HistoryReasoningItem historyReasoningItem) {
+            return "reasoning: " + blankToPlaceholder(historyReasoningItem.summary())
+                    + (historyReasoningItem.detail().isBlank() ? "" : " | " + historyReasoningItem.detail());
+        }
         if (item instanceof HistoryRuntimeErrorItem historyRuntimeErrorItem) {
             return "runtimeError: " + historyRuntimeErrorItem.message();
         }
@@ -385,6 +402,9 @@ public class DefaultThreadContextReconstructionService implements ThreadContextR
     private String summarizeItem(TurnItem item) {
         if (item instanceof UserMessageItem userMessageItem) {
             return "userMessage: " + userMessageItem.text();
+        }
+        if (item instanceof UserImageItem userImageItem) {
+            return "userImage: " + imageSummary(userImageItem.imageUrl(), userImageItem.detail());
         }
         if (item instanceof AgentMessageItem agentMessageItem) {
             return "agentMessage: " + agentMessageItem.text();
@@ -420,10 +440,22 @@ public class DefaultThreadContextReconstructionService implements ThreadContextR
         if (item instanceof ApprovalItem approvalItem) {
             return "approval: " + approvalItem.state() + " " + approvalItem.detail();
         }
+        if (item instanceof ReasoningItem reasoningItem) {
+            return "reasoning: " + blankToPlaceholder(reasoningItem.summary())
+                    + (reasoningItem.detail() == null || reasoningItem.detail().isBlank() ? "" : " | " + reasoningItem.detail());
+        }
         if (item instanceof RuntimeErrorItem runtimeErrorItem) {
             return "runtimeError: " + runtimeErrorItem.message();
         }
         return item.getClass().getSimpleName();
+    }
+
+    private String imageSummary(String imageUrl, String detail) {
+        String url = imageUrl == null || imageUrl.isBlank() ? "(image)" : imageUrl;
+        if (detail == null || detail.isBlank()) {
+            return url;
+        }
+        return url + " (detail=" + detail + ")";
     }
 
     private String summarizeEvent(org.dean.codex.protocol.event.TurnEvent event) {

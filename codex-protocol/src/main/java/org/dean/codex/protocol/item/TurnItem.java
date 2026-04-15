@@ -9,6 +9,7 @@ import java.time.Instant;
 @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "type")
 @JsonSubTypes({
         @JsonSubTypes.Type(value = UserMessageItem.class, name = "userMessage"),
+        @JsonSubTypes.Type(value = UserImageItem.class, name = "userImage"),
         @JsonSubTypes.Type(value = AgentMessageItem.class, name = "agentMessage"),
         @JsonSubTypes.Type(value = PlanItem.class, name = "plan"),
         @JsonSubTypes.Type(value = ToolCallItem.class, name = "toolCall"),
@@ -16,9 +17,12 @@ import java.time.Instant;
         @JsonSubTypes.Type(value = CollabToolCallItem.class, name = "collabToolCall"),
         @JsonSubTypes.Type(value = SkillUseItem.class, name = "skillUse"),
         @JsonSubTypes.Type(value = ApprovalItem.class, name = "approval"),
+        @JsonSubTypes.Type(value = ReasoningItem.class, name = "reasoning"),
+        @JsonSubTypes.Type(value = RawModelOutputItem.class, name = "rawModelOutput"),
         @JsonSubTypes.Type(value = RuntimeErrorItem.class, name = "runtimeError")
 })
 public sealed interface TurnItem permits UserMessageItem,
+        UserImageItem,
         AgentMessageItem,
         PlanItem,
         ToolCallItem,
@@ -26,6 +30,8 @@ public sealed interface TurnItem permits UserMessageItem,
         CollabToolCallItem,
         SkillUseItem,
         ApprovalItem,
+        ReasoningItem,
+        RawModelOutputItem,
         RuntimeErrorItem {
 
     ItemId itemId();

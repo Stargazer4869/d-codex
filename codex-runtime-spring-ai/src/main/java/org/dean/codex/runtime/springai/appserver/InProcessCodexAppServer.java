@@ -654,7 +654,10 @@ public class InProcessCodexAppServer implements CodexAppServer {
             ensureReady();
             ThreadId threadId = requireThreadId(params);
             ensureRuntimeSubscriptions(List.of(threadId));
-            return new TurnStartResponse(runtimeGateway.turnStart(threadId, params.input()));
+            return new TurnStartResponse(runtimeGateway.turnStart(
+                    threadId,
+                    params.inputSummary(),
+                    org.dean.codex.runtime.springai.runtime.TurnInputMapper.toModelInputItems(params.effectiveInputItems())));
         }
 
         @Override

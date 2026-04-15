@@ -81,10 +81,13 @@ import org.dean.codex.protocol.item.AgentMessageItem;
 import org.dean.codex.protocol.item.ApprovalItem;
 import org.dean.codex.protocol.item.CollabToolCallItem;
 import org.dean.codex.protocol.item.PlanItem;
+import org.dean.codex.protocol.item.RawModelOutputItem;
+import org.dean.codex.protocol.item.ReasoningItem;
 import org.dean.codex.protocol.item.RuntimeErrorItem;
 import org.dean.codex.protocol.item.ToolCallItem;
 import org.dean.codex.protocol.item.ToolResultItem;
 import org.dean.codex.protocol.item.TurnItem;
+import org.dean.codex.protocol.item.UserImageItem;
 import org.dean.codex.protocol.item.UserMessageItem;
 import org.dean.codex.protocol.runtime.RuntimeTurn;
 import org.dean.codex.protocol.skill.SkillMetadata;
@@ -1016,8 +1019,22 @@ public class CodexConsoleRunner implements CommandLineRunner {
             System.out.println("[user] " + userMessageItem.text());
             return;
         }
+        if (item instanceof UserImageItem userImageItem) {
+            String detail = userImageItem.detail() == null || userImageItem.detail().isBlank()
+                    ? ""
+                    : " detail=" + userImageItem.detail();
+            System.out.println("[user:image] " + blankToPlaceholder(userImageItem.imageUrl()) + detail);
+            return;
+        }
         if (item instanceof AgentMessageItem agentMessageItem) {
             System.out.println("[assistant] " + agentMessageItem.text());
+            return;
+        }
+        if (item instanceof ReasoningItem reasoningItem) {
+            String detail = reasoningItem.detail() == null || reasoningItem.detail().isBlank()
+                    ? ""
+                    : " | " + compactText(reasoningItem.detail());
+            System.out.println("[reasoning] " + compactText(blankToPlaceholder(reasoningItem.summary())) + detail);
             return;
         }
         if (item instanceof PlanItem planItem) {
@@ -1054,6 +1071,18 @@ public class CodexConsoleRunner implements CommandLineRunner {
                         + compactText(blankToPlaceholder(approvalItem.command()))
                         + " -> " + compactText(approvalItem.detail()));
             }
+            return;
+        }
+        if (item instanceof RawModelOutputItem rawModelOutputItem) {
+            System.out.println("[model:raw] " + rawModelOutputItem.modelItemType()
+                    + (rawModelOutputItem.modelItemId().isBlank() ? "" : " id=" + rawModelOutputItem.modelItemId())
+                    + (rawModelOutputItem.streamId().isBlank() ? "" : " stream=" + rawModelOutputItem.streamId())
+                    + (rawModelOutputItem.streamSequence() <= 0 ? "" : " seq=" + rawModelOutputItem.streamSequence())
+                    + (rawModelOutputItem.step() <= 0 ? "" : " step=" + rawModelOutputItem.step())
+                    + (rawModelOutputItem.responseId().isBlank() ? "" : " response=" + rawModelOutputItem.responseId())
+                    + (rawModelOutputItem.providerSessionId().isBlank() ? "" : " session=" + rawModelOutputItem.providerSessionId())
+                    + (rawModelOutputItem.finishReason().isBlank() ? "" : " finish=" + rawModelOutputItem.finishReason())
+                    + " -> " + compactText(blankToPlaceholder(rawModelOutputItem.payloadJson())));
             return;
         }
         if (item instanceof RuntimeErrorItem runtimeErrorItem) {

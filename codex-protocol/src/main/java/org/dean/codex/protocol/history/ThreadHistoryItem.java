@@ -9,23 +9,27 @@ import java.time.Instant;
 @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "type")
 @JsonSubTypes({
         @JsonSubTypes.Type(value = HistoryMessageItem.class, name = "historyMessage"),
+        @JsonSubTypes.Type(value = HistoryImageItem.class, name = "historyImage"),
         @JsonSubTypes.Type(value = HistoryToolCallItem.class, name = "historyToolCall"),
         @JsonSubTypes.Type(value = HistoryToolResultItem.class, name = "historyToolResult"),
         @JsonSubTypes.Type(value = HistoryCollabToolCallItem.class, name = "historyCollabToolCall"),
         @JsonSubTypes.Type(value = HistoryPlanItem.class, name = "historyPlan"),
         @JsonSubTypes.Type(value = HistorySkillUseItem.class, name = "historySkillUse"),
         @JsonSubTypes.Type(value = HistoryApprovalItem.class, name = "historyApproval"),
+        @JsonSubTypes.Type(value = HistoryReasoningItem.class, name = "historyReasoning"),
         @JsonSubTypes.Type(value = HistoryRuntimeErrorItem.class, name = "historyRuntimeError"),
         @JsonSubTypes.Type(value = HistoryCompactionSummaryItem.class, name = "historyCompactionSummary"),
         @JsonSubTypes.Type(value = CompactedHistoryItem.class, name = "compactedHistory")
 })
 public sealed interface ThreadHistoryItem permits HistoryMessageItem,
+        HistoryImageItem,
         HistoryToolCallItem,
         HistoryToolResultItem,
         HistoryCollabToolCallItem,
         HistoryPlanItem,
         HistorySkillUseItem,
         HistoryApprovalItem,
+        HistoryReasoningItem,
         HistoryRuntimeErrorItem,
         HistoryCompactionSummaryItem,
         CompactedHistoryItem {

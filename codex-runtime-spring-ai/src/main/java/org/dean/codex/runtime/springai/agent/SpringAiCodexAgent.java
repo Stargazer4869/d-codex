@@ -9,6 +9,21 @@ import org.dean.codex.core.agent.CodexAgent;
 import org.dean.codex.core.agent.TurnControl;
 import org.dean.codex.core.context.ContextManager;
 import org.dean.codex.core.context.ThreadContextReconstructionService;
+import org.dean.codex.core.model.InputTextItem;
+import org.dean.codex.core.model.ModelAssistantMessageItem;
+import org.dean.codex.core.model.ModelInputItem;
+import org.dean.codex.core.model.ModelInputRole;
+import org.dean.codex.core.model.ModelRequestMetadata;
+import org.dean.codex.core.model.ModelRequest;
+import org.dean.codex.core.model.ModelReasoningConfig;
+import org.dean.codex.core.model.ModelResponse;
+import org.dean.codex.core.model.ModelOutputItem;
+import org.dean.codex.core.model.ModelReasoningItem;
+import org.dean.codex.core.model.ModelToolCallItem;
+import org.dean.codex.core.model.ModelToolKind;
+import org.dean.codex.core.model.ModelToolResultItem;
+import org.dean.codex.core.model.ModelToolSpec;
+import org.dean.codex.core.model.ResponsesModelClient;
 import org.dean.codex.core.skill.ResolvedSkill;
 import org.dean.codex.core.skill.SkillService;
 import org.dean.codex.core.tool.local.FilePatchTool;
@@ -24,6 +39,7 @@ import org.dean.codex.protocol.planning.PlannedEdit;
 import org.dean.codex.protocol.planning.PlannedEditType;
 import org.dean.codex.protocol.conversation.ItemId;
 import org.dean.codex.protocol.conversation.ThreadId;
+import org.dean.codex.protocol.conversation.ThreadSummary;
 import org.dean.codex.protocol.conversation.TurnId;
 import org.dean.codex.protocol.conversation.TurnStatus;
 import org.dean.codex.protocol.event.CodexTurnResult;
@@ -40,6 +56,8 @@ import org.dean.codex.protocol.item.AgentMessageItem;
 import org.dean.codex.protocol.item.ApprovalItem;
 import org.dean.codex.protocol.item.ApprovalState;
 import org.dean.codex.protocol.item.PlanItem;
+import org.dean.codex.protocol.item.RawModelOutputItem;
+import org.dean.codex.protocol.item.ReasoningItem;
 import org.dean.codex.protocol.item.RuntimeErrorItem;
 import org.dean.codex.protocol.item.SkillUseItem;
 import org.dean.codex.protocol.item.ToolCallItem;
@@ -53,6 +71,9 @@ import org.dean.codex.protocol.skill.SkillMetadata;
 import org.dean.codex.protocol.tool.CommandApprovalDecision;
 import org.dean.codex.protocol.tool.ExecCommandResult;
 import org.dean.codex.runtime.springai.config.CodexProperties;
+import org.dean.codex.runtime.springai.model.ChatClientResponsesModelClient;
+import org.dean.codex.runtime.springai.model.ThreadModelSessionSnapshot;
+import org.dean.codex.runtime.springai.model.ThreadModelSessionStateStore;
 import org.dean.codex.runtime.springai.prompt.DefaultPromptAssemblyService;
 import org.dean.codex.runtime.springai.prompt.DefaultToolObservationReducer;
 import org.dean.codex.runtime.springai.prompt.DefaultToolCapabilityRegistry;
@@ -64,7 +85,6 @@ import org.dean.codex.runtime.springai.prompt.ToolCapabilityRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -80,6 +100,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 @Component
@@ -87,7 +108,7 @@ public class SpringAiCodexAgent implements CodexAgent {
 
     private static final Logger logger = LoggerFactory.getLogger(SpringAiCodexAgent.class);
 
-    private final ChatClient chatClient;
+    private final ResponsesModelClient responsesModelClient;
     private final FileReaderTool fileReaderTool;
     private final FileSearchTool fileSearchTool;
     private final ListDirTool listDirTool;
@@ -102,6 +123,7 @@ public class SpringAiCodexAgent implements CodexAgent {
     private final ContextManager contextManager;
     private final SkillService skillService;
     private final PromptAssemblyService promptAssemblyService;
+    private final ThreadModelSessionStateStore threadModelSessionStateStore;
     private final ToolCapabilityRegistry toolCapabilityRegistry;
     private final ToolObservationReducer toolObservationReducer;
     private final ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
@@ -110,10 +132,15 @@ public class SpringAiCodexAgent implements CodexAgent {
     private final int maxActionsPerStep;
     private final int autoCompactTokenLimit;
     private final int contextWindow;
+    private final boolean emitRawOutputItems;
+    private final ModelReasoningConfig modelReasoningConfig;
     private List<PromptExecSessionContext> activeExecSessionsForPrompt = List.of();
+    private transient List<TurnItem> activePlannerStreamItems = new ArrayList<>();
+    private transient Consumer<TurnItem> activePlannerItemConsumer;
+    private transient List<String> activePlannerAssistantTexts = new ArrayList<>();
 
     @Autowired
-    public SpringAiCodexAgent(ChatClient.Builder chatClientBuilder,
+    public SpringAiCodexAgent(ResponsesModelClient responsesModelClient,
                               FileReaderTool fileReaderTool,
                               FileSearchTool fileSearchTool,
                               ListDirTool listDirTool,
@@ -129,8 +156,9 @@ public class SpringAiCodexAgent implements CodexAgent {
                               SkillService skillService,
                               @Qualifier("codexWorkspaceRoot") Path workspaceRoot,
                               CodexProperties codexProperties,
+                              ObjectProvider<ThreadModelSessionStateStore> threadModelSessionStateStoreProvider,
                               PromptAssemblyService promptAssemblyService) {
-        this(chatClientBuilder,
+        this(responsesModelClient,
                 fileReaderTool,
                 fileSearchTool,
                 listDirTool,
@@ -146,6 +174,7 @@ public class SpringAiCodexAgent implements CodexAgent {
                 skillService,
                 workspaceRoot,
                 codexProperties,
+                threadModelSessionStateStoreProvider == null ? null : threadModelSessionStateStoreProvider.getIfAvailable(),
                 promptAssemblyService);
     }
 
@@ -164,7 +193,7 @@ public class SpringAiCodexAgent implements CodexAgent {
                        SkillService skillService,
                        Path workspaceRoot,
                        CodexProperties codexProperties) {
-        this(chatClientBuilder,
+        this(new ChatClientResponsesModelClient(chatClientBuilder),
                 fileReaderTool,
                 fileSearchTool,
                 listDirTool,
@@ -198,7 +227,7 @@ public class SpringAiCodexAgent implements CodexAgent {
                        SkillService skillService,
                        Path workspaceRoot,
                        CodexProperties codexProperties) {
-        this(chatClientBuilder,
+        this(new ChatClientResponsesModelClient(chatClientBuilder),
                 fileReaderTool,
                 fileSearchTool,
                 listDirTool,
@@ -214,10 +243,84 @@ public class SpringAiCodexAgent implements CodexAgent {
                 skillService,
                 workspaceRoot,
                 codexProperties,
+                null,
                 null);
     }
 
-    private SpringAiCodexAgent(ChatClient.Builder chatClientBuilder,
+    SpringAiCodexAgent(ResponsesModelClient responsesModelClient,
+                       FileReaderTool fileReaderTool,
+                       FileSearchTool fileSearchTool,
+                       ListDirTool listDirTool,
+                       WebSearchTool webSearchTool,
+                       FilePatchTool filePatchTool,
+                       FileWriterTool fileWriterTool,
+                       ShellCommandTool shellCommandTool,
+                       ExecCommandTool execCommandTool,
+                       CommandApprovalService commandApprovalService,
+                       AgentControl agentControl,
+                       ThreadContextReconstructionService threadContextReconstructionService,
+                       ContextManager contextManager,
+                       SkillService skillService,
+                       Path workspaceRoot,
+                       CodexProperties codexProperties) {
+        this(responsesModelClient,
+                fileReaderTool,
+                fileSearchTool,
+                listDirTool,
+                webSearchTool,
+                filePatchTool,
+                fileWriterTool,
+                shellCommandTool,
+                execCommandTool,
+                commandApprovalService,
+                () -> agentControl,
+                threadContextReconstructionService,
+                contextManager,
+                skillService,
+                workspaceRoot,
+                codexProperties,
+                null,
+                null);
+    }
+
+    SpringAiCodexAgent(ResponsesModelClient responsesModelClient,
+                       FileReaderTool fileReaderTool,
+                       FileSearchTool fileSearchTool,
+                       ListDirTool listDirTool,
+                       WebSearchTool webSearchTool,
+                       FilePatchTool filePatchTool,
+                       FileWriterTool fileWriterTool,
+                       ShellCommandTool shellCommandTool,
+                       ExecCommandTool execCommandTool,
+                       CommandApprovalService commandApprovalService,
+                       AgentControl agentControl,
+                       ThreadContextReconstructionService threadContextReconstructionService,
+                       ContextManager contextManager,
+                       SkillService skillService,
+                       Path workspaceRoot,
+                       CodexProperties codexProperties,
+                       ThreadModelSessionStateStore threadModelSessionStateStore) {
+        this(responsesModelClient,
+                fileReaderTool,
+                fileSearchTool,
+                listDirTool,
+                webSearchTool,
+                filePatchTool,
+                fileWriterTool,
+                shellCommandTool,
+                execCommandTool,
+                commandApprovalService,
+                () -> agentControl,
+                threadContextReconstructionService,
+                contextManager,
+                skillService,
+                workspaceRoot,
+                codexProperties,
+                threadModelSessionStateStore,
+                null);
+    }
+
+    private SpringAiCodexAgent(ResponsesModelClient responsesModelClient,
                                FileReaderTool fileReaderTool,
                                FileSearchTool fileSearchTool,
                                ListDirTool listDirTool,
@@ -233,10 +336,9 @@ public class SpringAiCodexAgent implements CodexAgent {
                                SkillService skillService,
                                Path workspaceRoot,
                                CodexProperties codexProperties,
+                               ThreadModelSessionStateStore threadModelSessionStateStore,
                                PromptAssemblyService promptAssemblyService) {
-        this.chatClient = chatClientBuilder.clone()
-                .defaultAdvisors(new SimpleLoggerAdvisor())
-                .build();
+        this.responsesModelClient = responsesModelClient;
         this.fileReaderTool = fileReaderTool;
         this.fileSearchTool = fileSearchTool;
         this.listDirTool = listDirTool;
@@ -251,6 +353,7 @@ public class SpringAiCodexAgent implements CodexAgent {
         this.contextManager = contextManager;
         this.skillService = skillService;
         this.workspaceRoot = workspaceRoot;
+        this.threadModelSessionStateStore = threadModelSessionStateStore;
         this.toolCapabilityRegistry = new DefaultToolCapabilityRegistry();
         this.toolObservationReducer = new DefaultToolObservationReducer();
         CodexProperties.Agent agent = codexProperties.getAgent();
@@ -259,6 +362,10 @@ public class SpringAiCodexAgent implements CodexAgent {
         CodexProperties.Model model = codexProperties.getModel();
         this.autoCompactTokenLimit = Math.max(0, model.getAutoCompactTokenLimit());
         this.contextWindow = Math.max(0, model.getContextWindow());
+        this.emitRawOutputItems = model.isEmitRawOutputItems();
+        this.modelReasoningConfig = new ModelReasoningConfig(
+                model.getReasoningEffort(),
+                model.getReasoningSummaryMode());
         this.promptAssemblyService = promptAssemblyService == null
                 ? new DefaultPromptAssemblyService(this.workspaceRoot, this.maxSteps, this.maxActionsPerStep)
                 : promptAssemblyService;
@@ -278,18 +385,48 @@ public class SpringAiCodexAgent implements CodexAgent {
     public synchronized CodexTurnResult handleTurn(ThreadId threadId,
                                                    TurnId turnId,
                                                    String input,
+                                                   List<ModelInputItem> inputItems,
+                                                   Consumer<TurnItem> itemConsumer) {
+        return handleTurn(threadId, turnId, input, inputItems, itemConsumer, new TurnControl() { });
+    }
+
+    @Override
+    public synchronized CodexTurnResult handleTurn(ThreadId threadId,
+                                                   TurnId turnId,
+                                                   String input,
+                                                   List<ModelInputItem> inputItems,
                                                    Consumer<TurnItem> itemConsumer,
                                                    TurnControl turnControl) {
         String safeInput = input == null ? "" : input.trim();
+        List<ModelInputItem> safeInputItems = inputItems == null ? List.of() : List.copyOf(inputItems);
+        return doHandleTurn(threadId, turnId, safeInput, safeInputItems, itemConsumer, turnControl);
+    }
+
+    @Override
+    public synchronized CodexTurnResult handleTurn(ThreadId threadId,
+                                                   TurnId turnId,
+                                                   String input,
+                                                   Consumer<TurnItem> itemConsumer,
+                                                   TurnControl turnControl) {
+        return doHandleTurn(threadId, turnId, input == null ? "" : input.trim(), List.of(), itemConsumer, turnControl);
+    }
+
+    private CodexTurnResult doHandleTurn(ThreadId threadId,
+                                         TurnId turnId,
+                                         String safeInput,
+                                         List<ModelInputItem> inputItems,
+                                         Consumer<TurnItem> itemConsumer,
+                                         TurnControl turnControl) {
         TurnControl safeTurnControl = turnControl == null ? new TurnControl() { } : turnControl;
         try {
             activeExecSessionsForPrompt = List.of();
             List<ResolvedSkill> selectedSkills = selectedSkillsForInput(safeInput);
             List<SkillMetadata> availableSkills = skillService.listSkills(false);
-            logger.debug("planner turn start thread={} turn={} inputChars={} selectedSkills={} availableSkills={}",
+            logger.debug("planner turn start thread={} turn={} inputChars={} inputItems={} selectedSkills={} availableSkills={}",
                     threadId.value(),
                     turnId.value(),
                     safeInput.length(),
+                    inputItems.size(),
                     selectedSkills.size(),
                     availableSkills.size());
             List<TurnItem> preludeItems = new ArrayList<>();
@@ -301,6 +438,7 @@ public class SpringAiCodexAgent implements CodexAgent {
                     threadId,
                     turnId,
                     safeInput,
+                    inputItems,
                     itemConsumer,
                     safeTurnControl,
                     preludeItems,
@@ -330,6 +468,7 @@ public class SpringAiCodexAgent implements CodexAgent {
     private ExecutionOutcome runPlanningLoop(ThreadId threadId,
                                              TurnId turnId,
                                              String input,
+                                             List<ModelInputItem> inputItems,
                                              Consumer<TurnItem> itemConsumer,
                                              TurnControl turnControl,
                                              List<TurnItem> preludeItems,
@@ -374,15 +513,26 @@ public class SpringAiCodexAgent implements CodexAgent {
                     steeringInputs.size(),
                     selectedSkills.size(),
                     availableSkills.size());
-            PlannerStep decision = requestDecision(
-                    threadId,
-                    turnId,
-                    input,
-                    scratchpad.toString(),
-                    step,
-                    selectedSkills,
-                    availableSkills,
-                    steeringInputs);
+            activePlannerStreamItems = items;
+            activePlannerItemConsumer = itemConsumer;
+            activePlannerAssistantTexts = new ArrayList<>();
+            PlannerStep decision;
+            try {
+                decision = requestDecision(
+                        threadId,
+                        turnId,
+                        input,
+                        inputItems,
+                        scratchpad.toString(),
+                        step,
+                        selectedSkills,
+                        availableSkills,
+                        steeringInputs);
+            }
+            finally {
+                activePlannerStreamItems = new ArrayList<>();
+                activePlannerItemConsumer = null;
+            }
             if (turnControl.interruptionRequested()) {
                 return interruptedOutcome(items, itemConsumer);
             }
@@ -393,7 +543,9 @@ public class SpringAiCodexAgent implements CodexAgent {
                 String finalAnswer = decision.finalAnswer() == null || decision.finalAnswer().isBlank()
                         ? "I have finished the task, but the model did not provide a final answer."
                         : decision.finalAnswer();
-                emitItem(items, itemConsumer, agentMessageItem(finalAnswer));
+                if (!assistantTextAlreadyStreamed(finalAnswer)) {
+                    emitItem(items, itemConsumer, agentMessageItem(finalAnswer));
+                }
                 return new ExecutionOutcome(
                         TurnStatus.COMPLETED,
                         List.copyOf(items),
@@ -472,6 +624,7 @@ public class SpringAiCodexAgent implements CodexAgent {
     protected PlannerStep requestDecision(ThreadId threadId,
                                           TurnId turnId,
                                           String input,
+                                          List<ModelInputItem> inputItems,
                                           String scratchpad,
                                           int step,
                                           List<ResolvedSkill> selectedSkills,
@@ -489,6 +642,14 @@ public class SpringAiCodexAgent implements CodexAgent {
                 activeExecSessionsForPrompt);
         String systemPrompt = resolvedPrompt.systemPrompt();
         String userPrompt = resolvedPrompt.userPrompt();
+        ModelRequestMetadata requestMetadata = requestMetadata(threadId, turnId, step);
+        ModelRequest modelRequest = new ModelRequest(
+                systemPrompt,
+                composeModelInputItems(userPrompt, inputItems),
+                toModelToolSpecs(resolvedPrompt),
+                resolvedPrompt.toolContract().supportsParallelToolCalls(),
+                modelReasoningConfig,
+                requestMetadata);
         logger.debug("planner request start thread={} turn={} step={} systemChars={} userChars={} recentMessages={} recentTurns={} recentActivities={} selectedSkills={} availableSkills={} steeringInputs={}",
                 threadId.value(),
                 turnId == null ? "(null)" : turnId.value(),
@@ -503,18 +664,33 @@ public class SpringAiCodexAgent implements CodexAgent {
                 steeringInputs.size());
 
         long startedNanos = System.nanoTime();
-        String response = chatClient.prompt()
-                .system(systemPrompt)
-                .user(userPrompt)
-                .call()
-                .content();
-        logger.debug("planner request complete thread={} turn={} step={} elapsedMs={} responseChars={} responseNull={}",
+        String outputStreamId = UUID.randomUUID().toString();
+        AtomicInteger outputSequence = new AtomicInteger();
+        ModelResponse modelResponse = responsesModelClient.complete(modelRequest, outputItem ->
+                handleModelOutputItem(
+                        outputItem,
+                        activePlannerStreamItems,
+                        activePlannerItemConsumer,
+                        requestMetadata,
+                        outputStreamId,
+                        outputSequence.incrementAndGet()));
+        emitRawModelResponseMetadataItem(
+                modelResponse,
+                activePlannerStreamItems,
+                activePlannerItemConsumer,
+                requestMetadata,
+                outputStreamId,
+                outputSequence.incrementAndGet());
+        persistModelSessionSnapshot(threadId, turnId, modelResponse);
+        String response = modelResponse.assistantText();
+        logger.debug("planner request complete thread={} turn={} step={} elapsedMs={} responseChars={} responseNull={} outputItems={}",
                 threadId.value(),
                 turnId == null ? "(null)" : turnId.value(),
                 step,
                 (System.nanoTime() - startedNanos) / 1_000_000L,
                 response == null ? 0 : response.length(),
-                response == null);
+                response == null,
+                modelResponse.outputItems().size());
 
         PlannerStep decision = parseDecision(response);
         logger.debug("planner decision parsed thread={} turn={} step={} actions={} finished={} summaryChars={}",
@@ -525,6 +701,210 @@ public class SpringAiCodexAgent implements CodexAgent {
                 decision.isFinished(),
                 decision.summary() == null ? 0 : decision.summary().length());
         return decision;
+    }
+
+    private ModelRequestMetadata requestMetadata(ThreadId threadId, TurnId turnId, int step) {
+        ThreadModelSessionSnapshot snapshot = modelSessionSnapshot(threadId);
+        if (snapshot == null) {
+            return new ModelRequestMetadata(
+                    threadId == null ? "" : threadId.value(),
+                    turnId == null ? "" : turnId.value(),
+                    step);
+        }
+        return snapshot.toRequestMetadata(threadId, turnId, step);
+    }
+
+    private ThreadModelSessionSnapshot modelSessionSnapshot(ThreadId threadId) {
+        if (threadModelSessionStateStore == null || threadId == null) {
+            return null;
+        }
+        return threadModelSessionStateStore.read(threadId)
+                .orElseGet(() -> ThreadModelSessionSnapshot.initial(new ThreadSummary(
+                        threadId,
+                        "Thread " + threadId.value(),
+                        Instant.now(),
+                        Instant.now(),
+                        0)));
+    }
+
+    private void persistModelSessionSnapshot(ThreadId threadId, TurnId turnId, ModelResponse modelResponse) {
+        if (threadModelSessionStateStore == null || threadId == null || turnId == null) {
+            return;
+        }
+        ThreadModelSessionSnapshot snapshot = modelSessionSnapshot(threadId);
+        if (snapshot == null) {
+            return;
+        }
+        threadModelSessionStateStore.write(threadId, snapshot.advance(turnId, modelResponse == null ? null : modelResponse.metadata()));
+    }
+
+    private List<ModelInputItem> composeModelInputItems(String userPrompt, List<ModelInputItem> inputItems) {
+        List<ModelInputItem> items = new ArrayList<>();
+        items.add(new InputTextItem(ModelInputRole.USER, userPrompt));
+        if (inputItems != null) {
+            inputItems.stream()
+                    .filter(item -> !(item instanceof InputTextItem))
+                    .forEach(items::add);
+        }
+        return List.copyOf(items);
+    }
+
+    private void handleModelOutputItem(ModelOutputItem outputItem,
+                                       List<TurnItem> items,
+                                       Consumer<TurnItem> itemConsumer,
+                                       ModelRequestMetadata requestMetadata,
+                                       String outputStreamId,
+                                       int outputSequence) {
+        emitRawModelOutputItem(outputItem, items, itemConsumer, requestMetadata, outputStreamId, outputSequence);
+        if (outputItem instanceof ModelAssistantMessageItem assistantMessageItem) {
+            String text = assistantMessageItem.text();
+            if (shouldStreamAssistantMessage(text)) {
+                recordStreamedAssistantText(text);
+                emitItem(items, itemConsumer, new AgentMessageItem(
+                        new ItemId(assistantMessageItem.id().isBlank() ? UUID.randomUUID().toString() : assistantMessageItem.id()),
+                        text,
+                        Instant.now()));
+            }
+            return;
+        }
+        if (outputItem instanceof ModelReasoningItem reasoningItem) {
+            emitItem(items, itemConsumer, new ReasoningItem(
+                    new ItemId(reasoningItem.id().isBlank() ? UUID.randomUUID().toString() : reasoningItem.id()),
+                    reasoningItem.summary(),
+                    reasoningItem.content(),
+                    Instant.now()));
+            return;
+        }
+        if (outputItem instanceof ModelToolCallItem toolCallItem) {
+            emitItem(items, itemConsumer, new ToolCallItem(
+                    new ItemId(toolCallItem.id().isBlank() ? UUID.randomUUID().toString() : toolCallItem.id()),
+                    toolCallItem.toolName(),
+                    toolCallItem.argumentsJson(),
+                    Instant.now()));
+            return;
+        }
+        if (outputItem instanceof ModelToolResultItem toolResultItem) {
+            emitItem(items, itemConsumer, new ToolResultItem(
+                    new ItemId(toolResultItem.id().isBlank() ? UUID.randomUUID().toString() : toolResultItem.id()),
+                    toolResultItem.toolName(),
+                    toolResultItem.outputText(),
+                    Instant.now()));
+        }
+    }
+
+    private void emitRawModelOutputItem(ModelOutputItem outputItem,
+                                        List<TurnItem> items,
+                                        Consumer<TurnItem> itemConsumer,
+                                        ModelRequestMetadata requestMetadata,
+                                        String outputStreamId,
+                                        int outputSequence) {
+        if (!emitRawOutputItems || outputItem == null) {
+            return;
+        }
+        emitItem(items, itemConsumer, new RawModelOutputItem(
+                new ItemId(UUID.randomUUID().toString()),
+                outputItem.type(),
+                outputItem.id(),
+                outputStreamId,
+                outputSequence,
+                requestMetadata == null ? "" : requestMetadata.threadId(),
+                requestMetadata == null ? "" : requestMetadata.turnId(),
+                requestMetadata == null ? 0 : requestMetadata.step(),
+                "",
+                "",
+                "",
+                serializeModelOutputItem(outputItem),
+                Instant.now()));
+    }
+
+    private void emitRawModelResponseMetadataItem(ModelResponse modelResponse,
+                                                  List<TurnItem> items,
+                                                  Consumer<TurnItem> itemConsumer,
+                                                  ModelRequestMetadata requestMetadata,
+                                                  String outputStreamId,
+                                                  int outputSequence) {
+        if (!emitRawOutputItems || modelResponse == null) {
+            return;
+        }
+        emitItem(items, itemConsumer, new RawModelOutputItem(
+                new ItemId(UUID.randomUUID().toString()),
+                "response_metadata",
+                modelResponse.metadata().responseId(),
+                outputStreamId,
+                outputSequence,
+                requestMetadata == null ? "" : requestMetadata.threadId(),
+                requestMetadata == null ? "" : requestMetadata.turnId(),
+                requestMetadata == null ? 0 : requestMetadata.step(),
+                modelResponse.metadata().responseId(),
+                modelResponse.metadata().sessionId(),
+                modelResponse.metadata().finishReason(),
+                serializeRawPayload(modelResponse.metadata()),
+                Instant.now()));
+    }
+
+    private String serializeModelOutputItem(ModelOutputItem outputItem) {
+        return serializeRawPayload(outputItem);
+    }
+
+    private String serializeRawPayload(Object value) {
+        try {
+            return objectMapper.writeValueAsString(value);
+        }
+        catch (Exception exception) {
+            logger.debug("Unable to serialize raw model payload {}", value == null ? "(null)" : value.getClass().getSimpleName(), exception);
+            return "";
+        }
+    }
+
+    private boolean shouldStreamAssistantMessage(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        String trimmed = text.trim();
+        if (!(trimmed.startsWith("{") && trimmed.endsWith("}"))) {
+            return true;
+        }
+        try {
+            JsonNode node = objectMapper.readTree(trimmed);
+            return !(node.isObject() && (node.has("actions") || node.has("finalAnswer") || node.has("summary") || node.has("thought")));
+        }
+        catch (Exception ignored) {
+            return true;
+        }
+    }
+
+    private void recordStreamedAssistantText(String text) {
+        if (text == null || text.isBlank()) {
+            return;
+        }
+        if (activePlannerAssistantTexts == null) {
+            activePlannerAssistantTexts = new ArrayList<>();
+        }
+        activePlannerAssistantTexts.add(text.trim());
+    }
+
+    private boolean assistantTextAlreadyStreamed(String finalAnswer) {
+        if (finalAnswer == null || finalAnswer.isBlank() || activePlannerAssistantTexts == null || activePlannerAssistantTexts.isEmpty()) {
+            return false;
+        }
+        String normalized = finalAnswer.trim();
+        return activePlannerAssistantTexts.stream().anyMatch(normalized::equals);
+    }
+
+    private List<ModelToolSpec> toModelToolSpecs(ResolvedPrompt resolvedPrompt) {
+        if (resolvedPrompt == null || resolvedPrompt.toolContract() == null) {
+            return List.of();
+        }
+        return resolvedPrompt.toolContract().visibleTools().stream()
+                .map(tool -> new ModelToolSpec(
+                        ModelToolKind.FUNCTION,
+                        tool.name(),
+                        tool.description(),
+                        tool.inputSchema(),
+                        tool.outputSchema(),
+                        tool.supportsParallelExecution(),
+                        tool.supplementaryInstructions()))
+                .toList();
     }
 
     private boolean maybeAutoCompactBeforeSampling(ThreadId threadId,

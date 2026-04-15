@@ -1,11 +1,18 @@
 package org.dean.codex.runtime.springai.context;
 
+import org.dean.codex.core.model.InputTextItem;
+import org.dean.codex.core.model.ModelCompactRequest;
+import org.dean.codex.core.model.ModelInputRole;
+import org.dean.codex.core.model.ModelRequestMetadata;
+import org.dean.codex.core.model.ResponsesCompactClient;
 import org.dean.codex.protocol.conversation.MessageRole;
 import org.dean.codex.protocol.conversation.ThreadId;
 import org.dean.codex.protocol.history.HistoryApprovalItem;
 import org.dean.codex.protocol.history.HistoryCompactionSummaryItem;
+import org.dean.codex.protocol.history.HistoryImageItem;
 import org.dean.codex.protocol.history.HistoryMessageItem;
 import org.dean.codex.protocol.history.HistoryPlanItem;
+import org.dean.codex.protocol.history.HistoryReasoningItem;
 import org.dean.codex.protocol.history.HistoryRuntimeErrorItem;
 import org.dean.codex.protocol.history.HistorySkillUseItem;
 import org.dean.codex.protocol.history.HistoryToolCallItem;
@@ -13,7 +20,6 @@ import org.dean.codex.protocol.history.HistoryToolResultItem;
 import org.dean.codex.protocol.history.ThreadHistoryItem;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.ai.chat.client.ChatClient;
 
 import java.util.List;
 import java.util.Locale;
@@ -23,10 +29,10 @@ public class SpringAiThreadCompactionSummarizer implements ThreadCompactionSumma
 
     private static final Logger logger = LoggerFactory.getLogger(SpringAiThreadCompactionSummarizer.class);
 
-    private final ChatClient chatClient;
+    private final ResponsesCompactClient compactClient;
 
-    public SpringAiThreadCompactionSummarizer(ChatClient.Builder chatClientBuilder) {
-        this.chatClient = chatClientBuilder.clone().build();
+    public SpringAiThreadCompactionSummarizer(ResponsesCompactClient compactClient) {
+        this.compactClient = compactClient;
     }
 
     @Override
@@ -51,11 +57,11 @@ public class SpringAiThreadCompactionSummarizer implements ThreadCompactionSumma
                 renderHistory(compactedHistory),
                 renderHistory(retainedHistory));
         logger.debug("Compaction prompt for thread {}\n{}", threadId == null ? "<null>" : threadId.value(), userPrompt);
-        String response = chatClient.prompt()
-                .system(systemPrompt)
-                .user(userPrompt)
-                .call()
-                .content();
+        String response = compactClient.compact(new ModelCompactRequest(
+                systemPrompt,
+                List.of(new InputTextItem(ModelInputRole.USER, userPrompt)),
+                new ModelRequestMetadata(threadId == null ? "" : threadId.value(), "", 0)))
+                .outputText();
         return response == null ? "" : response.trim();
     }
 
@@ -75,6 +81,14 @@ public class SpringAiThreadCompactionSummarizer implements ThreadCompactionSumma
         if (item instanceof HistoryMessageItem messageItem) {
             return messageItem.role().name().toLowerCase(Locale.ROOT) + ": " + messageItem.text();
         }
+        if (item instanceof HistoryImageItem imageItem) {
+            StringBuilder builder = new StringBuilder("user image: ")
+                    .append(imageItem.imageUrl().isBlank() ? "(image)" : imageItem.imageUrl());
+            if (!imageItem.detail().isBlank()) {
+                builder.append(" [detail=").append(imageItem.detail()).append(']');
+            }
+            return builder.toString();
+        }
         if (item instanceof HistoryPlanItem planItem) {
             return "plan: " + (planItem.plan() == null ? "(none)" : planItem.plan().summary());
         }
@@ -89,6 +103,10 @@ public class SpringAiThreadCompactionSummarizer implements ThreadCompactionSumma
         }
         if (item instanceof HistoryApprovalItem approvalItem) {
             return "approval: " + approvalItem.state() + " " + approvalItem.detail();
+        }
+        if (item instanceof HistoryReasoningItem reasoningItem) {
+            return "reasoning: " + reasoningItem.summary()
+                    + (reasoningItem.detail().isBlank() ? "" : " | " + reasoningItem.detail());
         }
         if (item instanceof HistoryRuntimeErrorItem runtimeErrorItem) {
             return "runtimeError: " + runtimeErrorItem.message();
