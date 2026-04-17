@@ -16,7 +16,7 @@ This is not only about switching endpoints. It is about matching the runtime sha
 - session and turn state for follow-up requests
 - compact endpoint usage
 
-The reference point is the current upstream Codex implementation in `/Users/chenzhu/Git/codex`.
+The reference point is the current upstream Codex implementation in `../../../codex`.
 
 ## Progress Tracker
 
@@ -68,8 +68,8 @@ These are the important upstream capabilities this design is targeting.
 
 Upstream Codex builds model-visible tools as Responses-compatible JSON in:
 
-- [`tool_spec.rs`](/Users/chenzhu/Git/codex/codex-rs/tools/src/tool_spec.rs)
-- [`responses_api.rs`](/Users/chenzhu/Git/codex/codex-rs/tools/src/responses_api.rs)
+- [`tool_spec.rs`](../../../codex/codex-rs/tools/src/tool_spec.rs)
+- [`responses_api.rs`](../../../codex/codex-rs/tools/src/responses_api.rs)
 
 This includes:
 
@@ -83,7 +83,7 @@ This includes:
 
 Upstream Codex consumes output as `ResponseItem`s and processes each completed item in:
 
-- [`stream_events_utils.rs`](/Users/chenzhu/Git/codex/codex-rs/core/src/stream_events_utils.rs)
+- [`stream_events_utils.rs`](../../../codex/codex-rs/core/src/stream_events_utils.rs)
 
 Important item kinds include:
 
@@ -97,7 +97,7 @@ Important item kinds include:
 
 Upstream Codex has a session-scoped Responses client with websocket support and HTTP fallback in:
 
-- [`client.rs`](/Users/chenzhu/Git/codex/codex-rs/core/src/client.rs)
+- [`client.rs`](../../../codex/codex-rs/core/src/client.rs)
 
 That transport carries:
 
@@ -110,7 +110,7 @@ That transport carries:
 
 Upstream builds explicit reasoning config in:
 
-- [`client.rs`](/Users/chenzhu/Git/codex/codex-rs/core/src/client.rs)
+- [`client.rs`](../../../codex/codex-rs/core/src/client.rs)
 
 This includes:
 
@@ -121,9 +121,9 @@ This includes:
 
 Tool definitions in upstream frequently carry `output_schema`, for example in:
 
-- [`local_tool.rs`](/Users/chenzhu/Git/codex/codex-rs/tools/src/local_tool.rs)
-- [`agent_tool.rs`](/Users/chenzhu/Git/codex/codex-rs/tools/src/agent_tool.rs)
-- [`mcp_tool.rs`](/Users/chenzhu/Git/codex/codex-rs/tools/src/mcp_tool.rs)
+- [`local_tool.rs`](../../../codex/codex-rs/tools/src/local_tool.rs)
+- [`agent_tool.rs`](../../../codex/codex-rs/tools/src/agent_tool.rs)
+- [`mcp_tool.rs`](../../../codex/codex-rs/tools/src/mcp_tool.rs)
 
 So Codex is not relying only on "return JSON" prompt instructions.
 
@@ -131,7 +131,7 @@ So Codex is not relying only on "return JSON" prompt instructions.
 
 Upstream prompt construction explicitly carries `parallel_tool_calls` in:
 
-- [`codex.rs`](/Users/chenzhu/Git/codex/codex-rs/core/src/codex.rs)
+- [`codex.rs`](../../../codex/codex-rs/core/src/codex.rs)
 
 ### 7. Multimodal typed input
 
@@ -141,7 +141,7 @@ Upstream prompt input is composed from typed items rather than only plain chat m
 
 Upstream uses a dedicated compact call in:
 
-- [`client.rs`](/Users/chenzhu/Git/codex/codex-rs/core/src/client.rs)
+- [`client.rs`](../../../codex/codex-rs/core/src/client.rs)
 
 That is distinct from ordinary text generation and is part of the real runtime behavior.
 
@@ -151,8 +151,8 @@ The Java rebuild has made good progress in adjacent areas, but it is still not R
 
 Current Java strengths:
 
-- layered prompt assembly via [`DefaultPromptAssemblyService.java`](/Users/chenzhu/Git/play-with-ai/codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/prompt/DefaultPromptAssemblyService.java)
-- a growing tool contract layer via [`DefaultToolContractResolver.java`](/Users/chenzhu/Git/play-with-ai/codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/prompt/DefaultToolContractResolver.java)
+- layered prompt assembly via [`DefaultPromptAssemblyService.java`](../../codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/prompt/DefaultPromptAssemblyService.java)
+- a growing tool contract layer via [`DefaultToolContractResolver.java`](../../codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/prompt/DefaultToolContractResolver.java)
 - strong thread history and compaction work
 - unified exec sessions and streamed command notifications
 
@@ -206,7 +206,7 @@ Responsibilities:
 - expose response/session metadata
 - support future websocket or incremental transport behavior
 
-This should sit beside, and eventually replace, the current chat-only request path in [`SpringAiCodexAgent.java`](/Users/chenzhu/Git/play-with-ai/codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/agent/SpringAiCodexAgent.java).
+This should sit beside, and eventually replace, the current chat-only request path in [`SpringAiCodexAgent.java`](../../codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/agent/SpringAiCodexAgent.java).
 
 ### 3. Make tool specs first-class
 

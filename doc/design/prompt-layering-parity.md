@@ -24,7 +24,7 @@ Today the Java runtime works, but prompt assembly is too monolithic.
 
 Current Java behavior:
 
-- [SpringAiCodexAgent.java](/Users/chenzhu/Git/play-with-ai/codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/agent/SpringAiCodexAgent.java) builds one large system prompt in `buildSystemPrompt(...)`
+- [SpringAiCodexAgent.java](../../codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/agent/SpringAiCodexAgent.java) builds one large system prompt in `buildSystemPrompt(...)`
 - that prompt mixes:
   - agent identity
   - tool descriptions
@@ -49,13 +49,13 @@ The Java rebuild should move toward that shape so future features are easier to 
 
 The important current pieces are:
 
-- [SpringAiCodexAgent.java](/Users/chenzhu/Git/play-with-ai/codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/agent/SpringAiCodexAgent.java)
+- [SpringAiCodexAgent.java](../../codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/agent/SpringAiCodexAgent.java)
   - `buildSystemPrompt(...)`
   - `buildUserPrompt(...)`
   - `requestDecision(...)`
-- [DefaultThreadContextReconstructionService.java](/Users/chenzhu/Git/play-with-ai/codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/context/DefaultThreadContextReconstructionService.java)
+- [DefaultThreadContextReconstructionService.java](../../codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/context/DefaultThreadContextReconstructionService.java)
   - reconstructs recent visible history and activity summaries
-- [SpringAiThreadCompactionSummarizer.java](/Users/chenzhu/Git/play-with-ai/codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/context/SpringAiThreadCompactionSummarizer.java)
+- [SpringAiThreadCompactionSummarizer.java](../../codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/context/SpringAiThreadCompactionSummarizer.java)
   - already uses a separate specialized prompt for compaction
 
 ### Problems in the current shape
@@ -73,12 +73,12 @@ The important current pieces are:
 
 The closest upstream reference points are:
 
-- [default.md](/Users/chenzhu/Git/codex/codex-rs/protocol/src/prompts/base_instructions/default.md)
-- [models.rs](/Users/chenzhu/Git/codex/codex-rs/protocol/src/models.rs)
-- [codex.rs](/Users/chenzhu/Git/codex/codex-rs/core/src/codex.rs)
-- [client_common.rs](/Users/chenzhu/Git/codex/codex-rs/core/src/client_common.rs)
-- [client.rs](/Users/chenzhu/Git/codex/codex-rs/core/src/client.rs)
-- [tool_spec.rs](/Users/chenzhu/Git/codex/codex-rs/tools/src/tool_spec.rs)
+- [default.md](../../../codex/codex-rs/protocol/src/prompts/base_instructions/default.md)
+- [models.rs](../../../codex/codex-rs/protocol/src/models.rs)
+- [codex.rs](../../../codex/codex-rs/core/src/codex.rs)
+- [client_common.rs](../../../codex/codex-rs/core/src/client_common.rs)
+- [client.rs](../../../codex/codex-rs/core/src/client.rs)
+- [tool_spec.rs](../../../codex/codex-rs/tools/src/tool_spec.rs)
 
 Important upstream properties:
 

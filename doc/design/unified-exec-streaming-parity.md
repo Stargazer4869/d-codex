@@ -12,7 +12,7 @@ Move the Java runtime from a one-shot shell-command model to a Codex-style unifi
 
 This design is specifically about the behavior where Codex appears to "watch" a long-running command and comment on it while the command is still running.
 
-The reference point is the current upstream Codex implementation in `/Users/chenzhu/Git/codex`.
+The reference point is the current upstream Codex implementation in `../../../codex`.
 
 ## Progress Tracker
 
@@ -64,7 +64,7 @@ The relevant upstream pieces are spread across tools, runtime, and app-server pr
 
 ### Model-facing tools
 
-Upstream exposes two core tools in [`local_tool.rs`](/Users/chenzhu/Git/codex/codex-rs/tools/src/local_tool.rs):
+Upstream exposes two core tools in [`local_tool.rs`](../../../codex/codex-rs/tools/src/local_tool.rs):
 
 - `exec_command`
 - `write_stdin`
@@ -80,7 +80,7 @@ That polling behavior is explicit in the tool description and is the key to incr
 
 ### Unified exec handlers
 
-The main runtime handler is [`unified_exec.rs`](/Users/chenzhu/Git/codex/codex-rs/core/src/tools/handlers/unified_exec.rs).
+The main runtime handler is [`unified_exec.rs`](../../../codex/codex-rs/core/src/tools/handlers/unified_exec.rs).
 
 Important upstream defaults:
 
@@ -95,7 +95,7 @@ This matches the user-visible behavior:
 
 ### Process/session management
 
-The persistent process/session logic lives in [`process_manager.rs`](/Users/chenzhu/Git/codex/codex-rs/core/src/unified_exec/process_manager.rs).
+The persistent process/session logic lives in [`process_manager.rs`](../../../codex/codex-rs/core/src/unified_exec/process_manager.rs).
 
 Important upstream behavior:
 
@@ -106,7 +106,7 @@ Important upstream behavior:
 
 ### Live output streaming
 
-Background output streaming lives in [`async_watcher.rs`](/Users/chenzhu/Git/codex/codex-rs/core/src/unified_exec/async_watcher.rs).
+Background output streaming lives in [`async_watcher.rs`](../../../codex/codex-rs/core/src/unified_exec/async_watcher.rs).
 
 Important upstream behavior:
 
@@ -118,7 +118,7 @@ This is what lets the UI keep updating in real time even before the model runs a
 
 ### Tool output returned to the model
 
-The model does not consume raw stdout deltas directly. Upstream formats exec results into tool output items in [`tools/context.rs`](/Users/chenzhu/Git/codex/codex-rs/core/src/tools/context.rs) and [`tools/mod.rs`](/Users/chenzhu/Git/codex/codex-rs/core/src/tools/mod.rs).
+The model does not consume raw stdout deltas directly. Upstream formats exec results into tool output items in [`tools/context.rs`](../../../codex/codex-rs/core/src/tools/context.rs) and [`tools/mod.rs`](../../../codex/codex-rs/core/src/tools/mod.rs).
 
 That is an important design point:
 
@@ -127,7 +127,7 @@ That is an important design point:
 
 ### Follow-up model loop
 
-When the model emits a tool call, upstream marks that a follow-up model pass is needed in [`stream_events_utils.rs`](/Users/chenzhu/Git/codex/codex-rs/core/src/stream_events_utils.rs), and the main agent loop continues in [`codex.rs`](/Users/chenzhu/Git/codex/codex-rs/core/src/codex.rs).
+When the model emits a tool call, upstream marks that a follow-up model pass is needed in [`stream_events_utils.rs`](../../../codex/codex-rs/core/src/stream_events_utils.rs), and the main agent loop continues in [`codex.rs`](../../../codex/codex-rs/core/src/codex.rs).
 
 That is why the assistant can appear to "notice" new output and then react to it:
 
@@ -140,8 +140,8 @@ That is why the assistant can appear to "notice" new output and then react to it
 
 The live event surface is visible in:
 
-- [`common.rs`](/Users/chenzhu/Git/codex/codex-rs/app-server-protocol/src/protocol/common.rs)
-- [`v2.rs`](/Users/chenzhu/Git/codex/codex-rs/app-server-protocol/src/protocol/v2.rs)
+- [`common.rs`](../../../codex/codex-rs/app-server-protocol/src/protocol/common.rs)
+- [`v2.rs`](../../../codex/codex-rs/app-server-protocol/src/protocol/v2.rs)
 
 Relevant notifications include:
 
@@ -154,7 +154,7 @@ The Java rebuild currently splits shell behavior across a few smaller features.
 
 ### One-shot tool execution
 
-[`ShellCommandToolImpl.java`](/Users/chenzhu/Git/play-with-ai/codex-tools-local/src/main/java/org/dean/codex/tools/local/ShellCommandToolImpl.java) runs:
+[`ShellCommandToolImpl.java`](../../codex-tools-local/src/main/java/org/dean/codex/tools/local/ShellCommandToolImpl.java) runs:
 
 - `zsh -lc <command>`
 - waits for process completion or timeout
@@ -171,7 +171,7 @@ This is useful for short commands, but it has no concept of:
 
 ### Thread shell command API
 
-The app-server currently exposes [`thread/shellCommand`](/Users/chenzhu/Git/play-with-ai/codex-core/src/main/java/org/dean/codex/core/appserver/CodexAppServerSession.java) through [`ThreadShellCommandResponse.java`](/Users/chenzhu/Git/play-with-ai/codex-protocol/src/main/java/org/dean/codex/protocol/appserver/ThreadShellCommandResponse.java).
+The app-server currently exposes [`thread/shellCommand`](../../codex-core/src/main/java/org/dean/codex/core/appserver/CodexAppServerSession.java) through [`ThreadShellCommandResponse.java`](../../codex-protocol/src/main/java/org/dean/codex/protocol/appserver/ThreadShellCommandResponse.java).
 
 That response shape is still small:
 
@@ -182,7 +182,7 @@ It does not model an upstream-style interactive exec session.
 
 ### Background terminals
 
-[`InProcessCodexAppServer.java`](/Users/chenzhu/Git/play-with-ai/codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/appserver/InProcessCodexAppServer.java) supports background terminal launch and cleanup.
+[`InProcessCodexAppServer.java`](../../codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/appserver/InProcessCodexAppServer.java) supports background terminal launch and cleanup.
 
 That helps with detached work, but it is still not unified exec:
 

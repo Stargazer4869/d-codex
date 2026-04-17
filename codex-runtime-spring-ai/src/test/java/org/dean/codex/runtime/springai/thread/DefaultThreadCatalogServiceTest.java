@@ -122,7 +122,7 @@ class DefaultThreadCatalogServiceTest {
                 status,
                 List.of(),
                 "/tmp/" + threadId.value(),
-                "/Users/chenzhu/Git/play-with-ai",
+                "/Users/chenzhu/Git/d-codex",
                 ThreadSource.CLI,
                 true,
                 null,

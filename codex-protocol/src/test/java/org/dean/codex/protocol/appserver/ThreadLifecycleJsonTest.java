@@ -35,7 +35,7 @@ class ThreadLifecycleJsonTest {
                 List.of("openai"),
                 List.of(ThreadSourceKind.CLI, ThreadSourceKind.SUB_AGENT),
                 Boolean.TRUE,
-                "/Users/chenzhu/Git/play-with-ai",
+                "/Users/chenzhu/Git/d-codex",
                 "thread",
                 List.of("workspace-write"),
                 List.of("review-sensitive"),
@@ -49,7 +49,7 @@ class ThreadLifecycleJsonTest {
         CommandExecParams commandExecParams = new CommandExecParams(
                 new ThreadId("thread-1"),
                 "printf 'hello'",
-                "/Users/chenzhu/Git/play-with-ai",
+                "/Users/chenzhu/Git/d-codex",
                 1_000L,
                 10_000L,
                 Boolean.TRUE);
@@ -170,7 +170,7 @@ class ThreadLifecycleJsonTest {
                 "session-1",
                 new ThreadId("thread-1"),
                 "printf 'hello'",
-                "/Users/chenzhu/Git/play-with-ai",
+                "/Users/chenzhu/Git/d-codex",
                 12345L,
                 "RUNNING",
                 Instant.parse("2026-04-01T00:00:03Z"),

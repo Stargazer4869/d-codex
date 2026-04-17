@@ -16,9 +16,9 @@ This document is intentionally scoped to the Java CLI/runtime rebuild in this re
 
 Upstream does have a `tool_search` tool, but it is primarily for connector/app/plugin discovery, not for the core local coding toolset:
 
-- [`tool_registry_plan.rs`](/Users/chenzhu/Git/codex/codex-rs/tools/src/tool_registry_plan.rs)
-- [`tool_discovery.rs`](/Users/chenzhu/Git/codex/codex-rs/tools/src/tool_discovery.rs)
-- [`ClientRequest.ts`](/Users/chenzhu/Git/codex/codex-rs/app-server-protocol/schema/typescript/ClientRequest.ts)
+- [`tool_registry_plan.rs`](../../../codex/codex-rs/tools/src/tool_registry_plan.rs)
+- [`tool_discovery.rs`](../../../codex/codex-rs/tools/src/tool_discovery.rs)
+- [`ClientRequest.ts`](../../../codex/codex-rs/app-server-protocol/schema/typescript/ClientRequest.ts)
 
 The core built-in tool mix is still explicit and relatively understandable:
 
@@ -35,9 +35,9 @@ The core built-in tool mix is still explicit and relatively understandable:
 
 Relevant references:
 
-- [`tool_registry_plan.rs`](/Users/chenzhu/Git/codex/codex-rs/tools/src/tool_registry_plan.rs)
-- [`tool_spec.rs`](/Users/chenzhu/Git/codex/codex-rs/tools/src/tool_spec.rs)
-- [`utility_tool.rs`](/Users/chenzhu/Git/codex/codex-rs/tools/src/utility_tool.rs)
+- [`tool_registry_plan.rs`](../../../codex/codex-rs/tools/src/tool_registry_plan.rs)
+- [`tool_spec.rs`](../../../codex/codex-rs/tools/src/tool_spec.rs)
+- [`utility_tool.rs`](../../../codex/codex-rs/tools/src/utility_tool.rs)
 
 Design implication for Java:
 
@@ -48,19 +48,19 @@ Design implication for Java:
 
 Upstream parallel tool calling is not a single switch. It has two levels of control:
 
-- model capability: [`supports_parallel_tool_calls`](/Users/chenzhu/Git/codex/codex-rs/protocol/src/openai_models.rs)
-- tool capability: [`ConfiguredToolSpec.supports_parallel_tool_calls`](/Users/chenzhu/Git/codex/codex-rs/core/src/tools/registry.rs)
+- model capability: [`supports_parallel_tool_calls`](../../../codex/codex-rs/protocol/src/openai_models.rs)
+- tool capability: [`ConfiguredToolSpec.supports_parallel_tool_calls`](../../../codex/codex-rs/core/src/tools/registry.rs)
 
 That capability is passed through to the Responses API request body as `parallel_tool_calls`:
 
-- [`codex-api/src/common.rs`](/Users/chenzhu/Git/codex/codex-rs/codex-api/src/common.rs)
-- [`core/src/codex.rs`](/Users/chenzhu/Git/codex/codex-rs/core/src/codex.rs)
-- [`models-manager/models.json`](/Users/chenzhu/Git/codex/codex-rs/models-manager/models.json)
+- [`codex-api/src/common.rs`](../../../codex/codex-rs/codex-api/src/common.rs)
+- [`core/src/codex.rs`](../../../codex/codex-rs/core/src/codex.rs)
+- [`models-manager/models.json`](../../../codex/codex-rs/models-manager/models.json)
 
 Upstream also tracks whether an individual tool spec may safely participate in parallel execution:
 
-- [`tools/registry.rs`](/Users/chenzhu/Git/codex/codex-rs/core/src/tools/registry.rs)
-- [`tools/router.rs`](/Users/chenzhu/Git/codex/codex-rs/core/src/tools/router.rs)
+- [`tools/registry.rs`](../../../codex/codex-rs/core/src/tools/registry.rs)
+- [`tools/router.rs`](../../../codex/codex-rs/core/src/tools/router.rs)
 
 Design implication for Java:
 
@@ -72,19 +72,19 @@ Design implication for Java:
 Upstream has several non-LLM reduction layers:
 
 - model-visible truncation policy:
-  - [`openai_models.rs`](/Users/chenzhu/Git/codex/codex-rs/protocol/src/openai_models.rs)
-  - [`protocol.rs`](/Users/chenzhu/Git/codex/codex-rs/protocol/src/protocol.rs)
+  - [`openai_models.rs`](../../../codex/codex-rs/protocol/src/openai_models.rs)
+  - [`protocol.rs`](../../../codex/codex-rs/protocol/src/protocol.rs)
 - shell output formatting for model consumption:
-  - [`tools/mod.rs`](/Users/chenzhu/Git/codex/codex-rs/core/src/tools/mod.rs)
-  - [`user_shell_command.rs`](/Users/chenzhu/Git/codex/codex-rs/core/src/user_shell_command.rs)
+  - [`tools/mod.rs`](../../../codex/codex-rs/core/src/tools/mod.rs)
+  - [`user_shell_command.rs`](../../../codex/codex-rs/core/src/user_shell_command.rs)
 - history-time truncation for tool outputs:
-  - [`context_manager/history.rs`](/Users/chenzhu/Git/codex/codex-rs/core/src/context_manager/history.rs)
+  - [`context_manager/history.rs`](../../../codex/codex-rs/core/src/context_manager/history.rs)
 - reusable truncation helpers:
-  - [`utils/output-truncation/src/lib.rs`](/Users/chenzhu/Git/codex/codex-rs/utils/output-truncation/src/lib.rs)
+  - [`utils/output-truncation/src/lib.rs`](../../../codex/codex-rs/utils/output-truncation/src/lib.rs)
 - exec capture caps:
-  - [`core/src/exec.rs`](/Users/chenzhu/Git/codex/codex-rs/core/src/exec.rs)
-  - [`CommandExecParams.ts`](/Users/chenzhu/Git/codex/codex-rs/app-server-protocol/schema/typescript/v2/CommandExecParams.ts)
-  - [`app-server/README.md`](/Users/chenzhu/Git/codex/codex-rs/app-server/README.md)
+  - [`core/src/exec.rs`](../../../codex/codex-rs/core/src/exec.rs)
+  - [`CommandExecParams.ts`](../../../codex/codex-rs/app-server-protocol/schema/typescript/v2/CommandExecParams.ts)
+  - [`app-server/README.md`](../../../codex/codex-rs/app-server/README.md)
 
 This means upstream can discard or shrink large tool output before it ever needs a compaction turn.
 
@@ -97,13 +97,13 @@ Design implication for Java:
 
 Upstream has a native `web_search` tool:
 
-- [`tool_spec.rs`](/Users/chenzhu/Git/codex/codex-rs/tools/src/tool_spec.rs)
-- [`tool_registry_plan.rs`](/Users/chenzhu/Git/codex/codex-rs/tools/src/tool_registry_plan.rs)
-- [`tui/src/cli.rs`](/Users/chenzhu/Git/codex/codex-rs/tui/src/cli.rs)
+- [`tool_spec.rs`](../../../codex/codex-rs/tools/src/tool_spec.rs)
+- [`tool_registry_plan.rs`](../../../codex/codex-rs/tools/src/tool_registry_plan.rs)
+- [`tui/src/cli.rs`](../../../codex/codex-rs/tui/src/cli.rs)
 
 Its local transcript representation is also lightweight. `WebSearchCall` is recorded as a compact call/action/status item rather than a giant raw result blob:
 
-- [`models.rs`](/Users/chenzhu/Git/codex/codex-rs/protocol/src/models.rs)
+- [`models.rs`](../../../codex/codex-rs/protocol/src/models.rs)
 
 Design implication for Java:
 
@@ -124,25 +124,25 @@ The current Java planner-visible tool surface is still relatively small:
 
 Relevant references:
 
-- [`DefaultToolContractResolver.java`](/Users/chenzhu/Git/play-with-ai/codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/prompt/DefaultToolContractResolver.java)
-- [`SpringAiCodexAgent.java`](/Users/chenzhu/Git/play-with-ai/codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/agent/SpringAiCodexAgent.java)
+- [`DefaultToolContractResolver.java`](../../codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/prompt/DefaultToolContractResolver.java)
+- [`SpringAiCodexAgent.java`](../../codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/agent/SpringAiCodexAgent.java)
 
 Important observations about the current implementation:
 
 1. We already allow multiple actions in a planner step, but execute them sequentially.
-   - [`SpringAiCodexAgent.java`](/Users/chenzhu/Git/play-with-ai/codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/agent/SpringAiCodexAgent.java)
+   - [`SpringAiCodexAgent.java`](../../codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/agent/SpringAiCodexAgent.java)
 
 2. We already summarize persisted history fairly aggressively.
-   - [`ThreadHistoryMapper.java`](/Users/chenzhu/Git/play-with-ai/codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/history/ThreadHistoryMapper.java)
+   - [`ThreadHistoryMapper.java`](../../codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/history/ThreadHistoryMapper.java)
 
 3. We already truncate `READ_FILE` results and cap `SEARCH_FILES` matches.
-   - [`FileReaderToolImpl.java`](/Users/chenzhu/Git/play-with-ai/codex-tools-local/src/main/java/org/dean/codex/tools/local/FileReaderToolImpl.java)
-   - [`FileSearchToolImpl.java`](/Users/chenzhu/Git/play-with-ai/codex-tools-local/src/main/java/org/dean/codex/tools/local/FileSearchToolImpl.java)
+   - [`FileReaderToolImpl.java`](../../codex-tools-local/src/main/java/org/dean/codex/tools/local/FileReaderToolImpl.java)
+   - [`FileSearchToolImpl.java`](../../codex-tools-local/src/main/java/org/dean/codex/tools/local/FileSearchToolImpl.java)
 
 4. Our biggest output-growth gap is inside the live planner loop.
    The planner scratchpad currently appends raw JSON observations from every executed action:
-   - [`SpringAiCodexAgent.java`](/Users/chenzhu/Git/play-with-ai/codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/agent/SpringAiCodexAgent.java)
-   - [`DefaultPromptAssemblyService.java`](/Users/chenzhu/Git/play-with-ai/codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/prompt/DefaultPromptAssemblyService.java)
+   - [`SpringAiCodexAgent.java`](../../codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/agent/SpringAiCodexAgent.java)
+   - [`DefaultPromptAssemblyService.java`](../../codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/prompt/DefaultPromptAssemblyService.java)
 
 That means large tool payloads can still blow up same-turn context before history reconstruction ever helps.
 
@@ -264,7 +264,7 @@ Keep both bounded by design.
 
 ### 3. Parallel batch executor
 
-Refactor the current sequential batch executor in [`SpringAiCodexAgent.java`](/Users/chenzhu/Git/play-with-ai/codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/agent/SpringAiCodexAgent.java) into:
+Refactor the current sequential batch executor in [`SpringAiCodexAgent.java`](../../codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/agent/SpringAiCodexAgent.java) into:
 
 - action validation
 - wave planning

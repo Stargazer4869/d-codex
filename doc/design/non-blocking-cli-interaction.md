@@ -12,7 +12,7 @@ Move the Java CLI from a synchronous "submit a prompt, then block until the turn
 
 Status: implemented for ordinary interactive prompt usage, with explicit synchronous handling retained for lifecycle-heavy flows such as compaction and approval actions.
 
-The reference point is the current upstream Codex app-server, TUI, and core session/task behavior in `/Users/chenzhu/Git/codex`.
+The reference point is the current upstream Codex app-server, TUI, and core session/task behavior in `../../../codex`.
 
 ## Current Gap
 

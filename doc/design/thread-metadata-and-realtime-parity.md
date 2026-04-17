@@ -29,8 +29,8 @@ Those are different problems and should not be solved in one refactor.
 
 The two main upstream references are:
 
-- [`thread_metadata.rs`](/Users/chenzhu/Git/codex/codex-rs/state/src/model/thread_metadata.rs)
-- [`app-server/README.md`](/Users/chenzhu/Git/codex/codex-rs/app-server/README.md)
+- [`thread_metadata.rs`](../../../codex/codex-rs/state/src/model/thread_metadata.rs)
+- [`app-server/README.md`](../../../codex/codex-rs/app-server/README.md)
 
 Important upstream thread metadata fields:
 
@@ -57,7 +57,7 @@ Important upstream thread-runtime operations:
 
 ## Current Java State
 
-The Java thread summary in [`ThreadSummary.java`](/Users/chenzhu/Git/play-with-ai/codex-protocol/src/main/java/org/dean/codex/protocol/conversation/ThreadSummary.java) already includes:
+The Java thread summary in [`ThreadSummary.java`](../../codex-protocol/src/main/java/org/dean/codex/protocol/conversation/ThreadSummary.java) already includes:
 
 - `firstUserInput`
 - `sandboxMode`
@@ -65,7 +65,7 @@ The Java thread summary in [`ThreadSummary.java`](/Users/chenzhu/Git/play-with-a
 - lineage fields like `parentThreadId`, `agentNickname`, `agentRole`, and `agentPath`
 - current runtime `status`
 
-The Java app-server surface in [`CodexAppServerSession.java`](/Users/chenzhu/Git/play-with-ai/codex-core/src/main/java/org/dean/codex/core/appserver/CodexAppServerSession.java) already includes:
+The Java app-server surface in [`CodexAppServerSession.java`](../../codex-core/src/main/java/org/dean/codex/core/appserver/CodexAppServerSession.java) already includes:
 
 - `thread/name/set`
 - `thread/metadata/update`

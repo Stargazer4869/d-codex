@@ -9,7 +9,7 @@ Move the Java CLI from a constructor-driven REPL with ad hoc `:` commands to a C
 - no startup side effects before argument parsing
 - a single command model for help, parsing, and execution
 
-The reference point is the current upstream Codex CLI and TUI command model in `/Users/chenzhu/Git/codex`.
+The reference point is the current upstream Codex CLI and TUI command model in `../../../codex`.
 
 ## Command Policy
 

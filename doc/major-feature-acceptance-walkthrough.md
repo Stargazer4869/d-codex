@@ -131,7 +131,7 @@ Suggested commands:
 
 ```text
 /threads all --search codex
-/threads all --cwd /Users/chenzhu/Git/play-with-ai
+/threads all --cwd .
 /threads all --status idle
 /threads all --source cli
 /threads all --parent <thread-id-prefix>

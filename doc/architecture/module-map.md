@@ -38,9 +38,9 @@ experimental ----> codex-runtime-spring-ai
 
 ## Config Ownership
 
-- `codex-runtime-spring-ai` publishes shared defaults in [`codex-runtime-defaults.yml`](/Users/chenzhu/Git/play-with-ai/codex-runtime-spring-ai/src/main/resources/codex-runtime-defaults.yml)
-- `codex-cli` owns [`application.yml`](/Users/chenzhu/Git/play-with-ai/codex-cli/src/main/resources/application.yml)
-- `experimental` owns [`application.yml`](/Users/chenzhu/Git/play-with-ai/experimental/src/main/resources/application.yml)
+- `codex-runtime-spring-ai` publishes shared defaults in [`codex-runtime-defaults.yml`](../../codex-runtime-spring-ai/src/main/resources/codex-runtime-defaults.yml)
+- `codex-cli` owns [`application.yml`](../../codex-cli/src/main/resources/application.yml)
+- `experimental` owns [`application.yml`](../../experimental/src/main/resources/application.yml)
 - runnable modules import shared defaults explicitly through `spring.config.import`
 - prompt/completion logging for Spring AI observations is off by default in the shared defaults and can be re-enabled with `CODEX_CHAT_LOG_PROMPT=true` / `CODEX_CHAT_LOG_COMPLETION=true`
 - shell approval behavior is configured from the runnable module through `codex.shell.*`
