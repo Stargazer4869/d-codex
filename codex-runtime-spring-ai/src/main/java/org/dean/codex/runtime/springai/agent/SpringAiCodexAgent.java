@@ -562,7 +562,7 @@ public class SpringAiCodexAgent implements CodexAgent {
             String observation;
             BatchExecutionOutcome batchOutcome = null;
             if (decision.validationError() == null) {
-                batchOutcome = executeActions(threadId, turnId, decision.actions(), items, itemConsumer);
+                batchOutcome = executeActions(threadId, turnId, decision.actions(), items, itemConsumer, turnControl);
                 observation = batchOutcome.observation();
                 updateActiveExecSessions(activeExecSessions, batchOutcome.execSessionObservations());
             }
@@ -1024,6 +1024,15 @@ public class SpringAiCodexAgent implements CodexAgent {
                                          List<ToolActionRequest> actions,
                                          List<TurnItem> items,
                                          Consumer<TurnItem> itemConsumer) {
+        return executeActions(threadId, turnId, actions, items, itemConsumer, null);
+    }
+
+    BatchExecutionOutcome executeActions(ThreadId threadId,
+                                         TurnId turnId,
+                                         List<ToolActionRequest> actions,
+                                         List<TurnItem> items,
+                                         Consumer<TurnItem> itemConsumer,
+                                         TurnControl turnControl) {
         List<Map<String, Object>> results = new ArrayList<>();
         List<String> approvalIds = new ArrayList<>();
         List<ExecSessionObservation> execSessionObservations = new ArrayList<>();
@@ -1061,7 +1070,7 @@ public class SpringAiCodexAgent implements CodexAgent {
             entry.put("index", index + 1);
             entry.put("action", action.action());
             entry.put("target", describeTarget(action));
-            ActionExecutionOutcome actionOutcome = executeAction(threadId, turnId, action, items, itemConsumer);
+            ActionExecutionOutcome actionOutcome = executeAction(threadId, turnId, action, items, itemConsumer, turnControl);
             entry.put("result", parseObservation(reduceObservation(action.action(), actionOutcome.observation())));
             results.add(entry);
             approvalIds.addAll(actionOutcome.approvalIds());
@@ -1144,6 +1153,15 @@ public class SpringAiCodexAgent implements CodexAgent {
                                          ToolActionRequest action,
                                          List<TurnItem> items,
                                          Consumer<TurnItem> itemConsumer) {
+        return executeAction(threadId, turnId, action, items, itemConsumer, null);
+    }
+
+    ActionExecutionOutcome executeAction(ThreadId threadId,
+                                         TurnId turnId,
+                                         ToolActionRequest action,
+                                         List<TurnItem> items,
+                                         Consumer<TurnItem> itemConsumer,
+                                         TurnControl turnControl) {
         emitItem(items, itemConsumer, toolCallItem(action.action().name(), describeTarget(action)));
         boolean collaborationAction = isCollaborationAction(action.action());
         Map<String, AgentMailboxState> collabMailboxes = Map.of();
@@ -1272,7 +1290,11 @@ public class SpringAiCodexAgent implements CodexAgent {
                     AgentControl agentControl = requireAgentControl();
                     List<ThreadId> waitTargets = resolveAgentThreadIds(agentControl, threadId, action.threadIds());
                     long timeoutMillis = effectiveWaitAgentTimeoutMillis(action.timeoutMillis());
-                    AgentWaitResult waitResult = agentControl.waitAgent(waitTargets, timeoutMillis);
+                    AgentWaitResult waitResult = waitForAgentResult(
+                            agentControl,
+                            waitTargets,
+                            timeoutMillis,
+                            turnControl);
                     LinkedHashMap<String, Object> response = new LinkedHashMap<>();
                     response.put("success", true);
                     response.put("action", "wait_agent");
@@ -1869,6 +1891,29 @@ public class SpringAiCodexAgent implements CodexAgent {
             return DEFAULT_WAIT_AGENT_TIMEOUT_MILLIS;
         }
         return Math.max(requestedTimeoutMillis, DEFAULT_WAIT_AGENT_TIMEOUT_MILLIS);
+    }
+
+    private AgentWaitResult waitForAgentResult(AgentControl agentControl,
+                                               List<ThreadId> waitTargets,
+                                               long timeoutMillis,
+                                               TurnControl turnControl) {
+        AgentWaitResult waitResult = agentControl.waitAgent(waitTargets, timeoutMillis);
+        while (shouldContinueWaitingForAgentResult(waitResult, turnControl)) {
+            waitResult = agentControl.waitAgent(waitTargets, timeoutMillis);
+        }
+        return waitResult;
+    }
+
+    private boolean shouldContinueWaitingForAgentResult(AgentWaitResult waitResult,
+                                                        TurnControl turnControl) {
+        if (waitResult == null || !waitResult.timedOut() || !isAgentAlreadyWorking(waitResult.status())
+                || hasUsableAgentFinalAnswer(waitResult)) {
+            return false;
+        }
+        if (turnControl != null && turnControl.interruptionRequested()) {
+            return false;
+        }
+        return waitResult.status() == AgentStatus.RUNNING || waitResult.status() == AgentStatus.PENDING_INIT;
     }
 
     private AgentSummary currentAgentSummary(AgentControl agentControl, ThreadId agentThreadId) {

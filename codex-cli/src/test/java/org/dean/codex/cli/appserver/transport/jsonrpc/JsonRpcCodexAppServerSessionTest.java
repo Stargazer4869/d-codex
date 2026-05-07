@@ -389,21 +389,21 @@ class JsonRpcCodexAppServerSessionTest {
 
             assertEquals(threadId, started.commandExecution().threadId());
             assertEquals("RUNNING", started.commandExecution().status());
-            assertTrue(started.stdout().contains("one"));
 
-            var polled = session.commandExecWrite(new CommandExecWriteParams(
-                    threadId,
-                    started.commandExecution().sessionId(),
-                    "",
-                    1_500L));
-            assertTrue(polled.stdout().contains("two"));
-
-            var completed = session.commandExecWrite(new CommandExecWriteParams(
-                    threadId,
-                    started.commandExecution().sessionId(),
-                    "",
-                    500L));
-            assertEquals("COMPLETED", completed.commandExecution().status());
+            var current = started;
+            StringBuilder combinedStdout = new StringBuilder(started.stdout());
+            long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+            while ("RUNNING".equals(current.commandExecution().status()) && System.nanoTime() < deadline) {
+                current = session.commandExecWrite(new CommandExecWriteParams(
+                        threadId,
+                        started.commandExecution().sessionId(),
+                        "",
+                        250L));
+                combinedStdout.append(current.stdout());
+            }
+            assertTrue(combinedStdout.toString().contains("one"));
+            assertTrue(combinedStdout.toString().contains("two"));
+            assertEquals("COMPLETED", current.commandExecution().status());
 
             var resize = session.commandExecResize(new CommandExecResizeParams(
                     threadId,

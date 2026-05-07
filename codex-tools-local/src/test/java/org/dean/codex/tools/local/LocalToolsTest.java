@@ -16,6 +16,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -171,23 +172,24 @@ class LocalToolsTest {
         assertTrue(started.success());
         assertTrue(started.executed());
         assertEquals("RUNNING", started.status());
-        assertTrue(started.stdout().contains("one"));
         assertFalse(started.sessionId().isBlank());
 
-        ExecCommandResult polled = execCommandTool.writeStdin(
-                new ThreadId("thread-1"),
-                started.sessionId(),
-                "",
-                1_500L);
-        assertTrue(polled.stdout().contains("two"));
+        ExecCommandResult current = started;
+        StringBuilder combinedStdout = new StringBuilder(started.stdout());
+        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while ("RUNNING".equals(current.status()) && System.nanoTime() < deadline) {
+            current = execCommandTool.writeStdin(
+                    new ThreadId("thread-1"),
+                    started.sessionId(),
+                    "",
+                    250L);
+            combinedStdout.append(current.stdout());
+        }
 
-        ExecCommandResult completed = execCommandTool.writeStdin(
-                new ThreadId("thread-1"),
-                started.sessionId(),
-                "",
-                500L);
-        assertEquals("COMPLETED", completed.status());
-        assertEquals(CommandApprovalDecision.ALLOW, completed.approvalDecision());
+        assertTrue(combinedStdout.toString().contains("one"));
+        assertTrue(combinedStdout.toString().contains("two"));
+        assertEquals("COMPLETED", current.status());
+        assertEquals(CommandApprovalDecision.ALLOW, current.approvalDecision());
     }
 
     @Test

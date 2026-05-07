@@ -1521,6 +1521,85 @@ class SpringAiCodexAgentTest {
     }
 
     @Test
+    void executeActionsKeepsWaitingLocallyUntilAgentProducesFinalAnswer() {
+        ThreadId agentThreadId = new ThreadId("agent-1");
+        SequencedWaitAgentControl agentControl = new SequencedWaitAgentControl(List.of(
+                new AgentWaitResult(
+                        agentThreadId,
+                        new TurnId("turn-1"),
+                        AgentStatus.RUNNING,
+                        AgentStatus.RUNNING,
+                        true,
+                        "Wait timed out.",
+                        "",
+                        new AgentMailboxState(agentThreadId, 0L, 0, Instant.parse("2026-04-01T00:01:00Z")),
+                        Instant.parse("2026-04-01T00:01:00Z")),
+                new AgentWaitResult(
+                        agentThreadId,
+                        new TurnId("turn-1"),
+                        AgentStatus.RUNNING,
+                        AgentStatus.RUNNING,
+                        true,
+                        "Wait timed out.",
+                        "",
+                        new AgentMailboxState(agentThreadId, 0L, 0, Instant.parse("2026-04-01T00:01:05Z")),
+                        Instant.parse("2026-04-01T00:01:05Z")),
+                new AgentWaitResult(
+                        agentThreadId,
+                        new TurnId("turn-2"),
+                        AgentStatus.RUNNING,
+                        AgentStatus.IDLE,
+                        false,
+                        "Agent produced a new turn result.",
+                        "worker completed",
+                        new AgentMailboxState(agentThreadId, 1L, 0, Instant.parse("2026-04-01T00:01:10Z")),
+                        Instant.parse("2026-04-01T00:01:10Z"))));
+        SpringAiCodexAgent agent = new SpringAiCodexAgent(
+                new RecordingResponsesModelClient("{\"summary\":\"Done\",\"finalAnswer\":\"Finished\"}"),
+                path -> new FileReadResult(true, path, "", false, 0, ""),
+                (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                new NoOpListDirTool(),
+                new NoOpWebSearchTool(),
+                (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
+                (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
+                new StubShellCommandTool(),
+                new NoOpExecCommandTool(),
+                new NoOpCommandApprovalService(),
+                agentControl,
+                new NoOpThreadContextReconstructionService(),
+                new NoOpContextManager(),
+                new NoOpSkillService(),
+                Path.of("/tmp/workspace"),
+                codexProperties(2, 1, 0, 0));
+
+        SpringAiCodexAgent.PlannerStep step = agent.parseDecision("""
+                {
+                  "summary": "Wait for helper",
+                  "actions": [
+                    {
+                      "action": "wait_agent",
+                      "threadIds": ["agent-1"]
+                    }
+                  ]
+                }
+                """);
+
+        SpringAiCodexAgent.BatchExecutionOutcome outcome = agent.executeActions(
+                new ThreadId("thread-parent"),
+                new TurnId("turn-1"),
+                step.actions(),
+                new ArrayList<>(),
+                null);
+
+        assertEquals(3, agentControl.waitCallCount.get());
+        assertEquals(List.of(5_000L, 5_000L, 5_000L), agentControl.waitTimeouts);
+        assertTrue(outcome.observation().contains("\"finalAnswer\":\"worker completed\""));
+        assertTrue(outcome.observation().contains("\"recommendedNextAction\":\"use_final_answer\""));
+        assertTrue(outcome.observation().contains("\"shouldUseFinalAnswer\":true"));
+        assertFalse(outcome.observation().contains("\"timedOut\":true"));
+    }
+
+    @Test
     void executeActionsResolvesAgentSelectorsByNickname() {
         RecordingAgentControl agentControl = new RecordingAgentControl();
         SpringAiCodexAgent agent = new SpringAiCodexAgent(
@@ -2325,6 +2404,78 @@ class SpringAiCodexAgentTest {
             this.listAgentsRecursive = recursive;
             return List.of(
                     new AgentSummary(new ThreadId("agent-1"), parentThreadId, "inspector", "reviewer", "subdir", 1, listedAgentStatus, Instant.parse("2026-04-01T00:00:00Z"), Instant.parse("2026-04-01T00:01:00Z"), null));
+        }
+    }
+
+    private static final class SequencedWaitAgentControl implements AgentControl {
+
+        private final Deque<AgentWaitResult> waitResults;
+        private final AtomicInteger waitCallCount = new AtomicInteger();
+        private final List<Long> waitTimeouts = new ArrayList<>();
+        private List<ThreadId> observedWaitThreadIds = List.of();
+
+        private SequencedWaitAgentControl(List<AgentWaitResult> waitResults) {
+            this.waitResults = new ArrayDeque<>(waitResults);
+        }
+
+        @Override
+        public AgentSummary spawnAgent(AgentSpawnRequest request) {
+            Instant now = Instant.parse("2026-04-01T00:00:00Z");
+            return new AgentSummary(new ThreadId("agent-1"), request == null ? null : request.parentThreadId(), "inspector", "reviewer", "subdir", 1, AgentStatus.IDLE, now, now, null);
+        }
+
+        @Override
+        public AgentSummary sendInput(ThreadId agentThreadId, AgentMessage message, boolean interrupt) {
+            Instant now = Instant.parse("2026-04-01T00:00:30Z");
+            return new AgentSummary(agentThreadId, message == null ? null : message.senderThreadId(), "inspector", "reviewer", "subdir", 1, AgentStatus.RUNNING, now, now, null);
+        }
+
+        @Override
+        public AgentWaitResult waitAgent(List<ThreadId> agentThreadIds, long timeoutMillis) {
+            this.observedWaitThreadIds = agentThreadIds == null ? List.of() : List.copyOf(agentThreadIds);
+            this.waitTimeouts.add(timeoutMillis);
+            this.waitCallCount.incrementAndGet();
+            if (waitResults.isEmpty()) {
+                ThreadId threadId = this.observedWaitThreadIds.isEmpty() ? null : this.observedWaitThreadIds.get(0);
+                return new AgentWaitResult(
+                        threadId,
+                        new TurnId("turn-fallback"),
+                        AgentStatus.RUNNING,
+                        AgentStatus.RUNNING,
+                        true,
+                        "Wait timed out.",
+                        "",
+                        new AgentMailboxState(threadId, 0L, 0, Instant.parse("2026-04-01T00:01:30Z")),
+                        Instant.parse("2026-04-01T00:01:30Z"));
+            }
+            return waitResults.removeFirst();
+        }
+
+        @Override
+        public AgentSummary resumeAgent(ThreadId agentThreadId) {
+            Instant now = Instant.parse("2026-04-01T00:02:00Z");
+            return new AgentSummary(agentThreadId, new ThreadId("thread-parent"), "inspector", "reviewer", "subdir", 1, AgentStatus.IDLE, now, now, null);
+        }
+
+        @Override
+        public AgentSummary closeAgent(ThreadId agentThreadId) {
+            Instant now = Instant.parse("2026-04-01T00:03:00Z");
+            return new AgentSummary(agentThreadId, new ThreadId("thread-parent"), "inspector", "reviewer", "subdir", 1, AgentStatus.SHUTDOWN, now, now, now);
+        }
+
+        @Override
+        public List<AgentSummary> listAgents(ThreadId parentThreadId, boolean recursive) {
+            return List.of(new AgentSummary(
+                    new ThreadId("agent-1"),
+                    parentThreadId,
+                    "inspector",
+                    "reviewer",
+                    "subdir",
+                    1,
+                    AgentStatus.RUNNING,
+                    Instant.parse("2026-04-01T00:00:00Z"),
+                    Instant.parse("2026-04-01T00:01:00Z"),
+                    null));
         }
     }
 

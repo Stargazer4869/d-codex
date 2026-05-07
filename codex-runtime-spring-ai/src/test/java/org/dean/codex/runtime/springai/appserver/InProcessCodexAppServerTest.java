@@ -817,23 +817,23 @@ class InProcessCodexAppServerTest {
 
             assertEquals(threadId, started.commandExecution().threadId());
             assertEquals("RUNNING", started.commandExecution().status());
-            assertTrue(started.stdout().contains("one"));
 
-            var polled = session.commandExecWrite(new CommandExecWriteParams(
-                    threadId,
-                    started.commandExecution().sessionId(),
-                    "",
-                    1_500L));
+            var current = started;
+            StringBuilder combinedStdout = new StringBuilder(started.stdout());
+            long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+            while ("RUNNING".equals(current.commandExecution().status()) && System.nanoTime() < deadline) {
+                current = session.commandExecWrite(new CommandExecWriteParams(
+                        threadId,
+                        started.commandExecution().sessionId(),
+                        "",
+                        250L));
+                combinedStdout.append(current.stdout());
+            }
 
-            assertTrue(polled.stdout().contains("two"));
+            assertTrue(combinedStdout.toString().contains("one"));
+            assertTrue(combinedStdout.toString().contains("two"));
 
-            var completed = session.commandExecWrite(new CommandExecWriteParams(
-                    threadId,
-                    started.commandExecution().sessionId(),
-                    "",
-                    500L));
-
-            assertEquals("COMPLETED", completed.commandExecution().status());
+            assertEquals("COMPLETED", current.commandExecution().status());
 
             var resize = session.commandExecResize(new CommandExecResizeParams(
                     threadId,
@@ -889,18 +889,22 @@ class InProcessCodexAppServerTest {
                     started.commandExecution().sessionId(),
                     "hello\n",
                     1_500L));
-            String firstPoll = normalizeOutput(started.stdout() + written.stdout());
-            assertTrue(firstPoll.contains("24 80"));
-            assertTrue(firstPoll.contains("40 120") || firstPoll.contains("got:hello"));
-
-            var completed = session.commandExecWrite(new CommandExecWriteParams(
-                    threadId,
-                    started.commandExecution().sessionId(),
-                    "",
-                    1_000L));
-            assertEquals("COMPLETED", completed.commandExecution().status());
-            String finalPoll = normalizeOutput(completed.stdout());
-            assertTrue(firstPoll.contains("got:hello") || finalPoll.contains("got:hello"));
+            StringBuilder combinedOutput = new StringBuilder(normalizeOutput(started.stdout() + written.stdout()));
+            var current = written;
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while ("RUNNING".equals(current.commandExecution().status()) && System.nanoTime() < deadline) {
+                current = session.commandExecWrite(new CommandExecWriteParams(
+                        threadId,
+                        started.commandExecution().sessionId(),
+                        "",
+                        250L));
+                combinedOutput.append(normalizeOutput(current.stdout()));
+            }
+            String fullOutput = combinedOutput.toString();
+            assertTrue(fullOutput.contains("24 80"));
+            assertTrue(fullOutput.contains("40 120"));
+            assertTrue(fullOutput.contains("got:hello"));
+            assertEquals("COMPLETED", current.commandExecution().status());
 
             List<AppServerNotification> observed = awaitNotifications(notifications, 16);
             assertTrue(observed.stream().anyMatch(notification ->

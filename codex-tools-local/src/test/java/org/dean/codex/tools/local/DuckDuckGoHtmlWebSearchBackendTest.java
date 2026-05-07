@@ -44,7 +44,7 @@ class DuckDuckGoHtmlWebSearchBackendTest {
             server.start();
 
             HttpClient httpClient = HttpClient.newHttpClient();
-            URI baseUri = URI.create("http://localhost:" + server.getAddress().getPort() + "/html/");
+            URI baseUri = URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/html/");
             DuckDuckGoHtmlWebSearchBackend backend = new DuckDuckGoHtmlWebSearchBackend(httpClient, baseUri);
 
             WebSearchResult result = backend.search("codex java", 2);
@@ -88,7 +88,7 @@ class DuckDuckGoHtmlWebSearchBackendTest {
             server.start();
 
             HttpClient httpClient = HttpClient.newHttpClient();
-            URI baseUri = URI.create("http://localhost:" + server.getAddress().getPort() + "/html/");
+            URI baseUri = URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/html/");
             DuckDuckGoHtmlWebSearchBackend backend = new DuckDuckGoHtmlWebSearchBackend(httpClient, baseUri);
 
             WebSearchResult result = backend.search("codex java", 1);
