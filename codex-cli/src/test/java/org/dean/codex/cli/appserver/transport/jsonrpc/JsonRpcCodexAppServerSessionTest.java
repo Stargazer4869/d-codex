@@ -1,6 +1,7 @@
 package org.dean.codex.cli.appserver.transport.jsonrpc;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.dean.codex.cli.appserver.CodexCliDiagnosticsProperties;
 import org.dean.codex.core.agent.TurnControl;
 import org.dean.codex.core.agent.TurnExecutor;
 import org.dean.codex.core.appserver.CodexAppServer;
@@ -61,8 +62,9 @@ import java.io.PipedInputStream;
 import java.io.PipedOutputStream;
 import java.io.BufferedWriter;
 import java.io.OutputStreamWriter;
-import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -83,6 +85,64 @@ class JsonRpcCodexAppServerSessionTest {
 
     @TempDir
     Path workspaceRoot;
+
+    @Test
+    void sessionWritesDiagnosticsForRequestsResponsesAndNotifications() throws Exception {
+        CodexAppServer appServer = appServer();
+        PipedOutputStream clientToServer = new PipedOutputStream();
+        PipedInputStream serverInput = new PipedInputStream(clientToServer);
+        PipedOutputStream serverToClient = new PipedOutputStream();
+        PipedInputStream clientInput = new PipedInputStream(serverToClient);
+        AtomicReference<Throwable> hostFailure = new AtomicReference<>();
+
+        Thread hostThread = new Thread(() -> {
+            try {
+                new StdioJsonRpcAppServerHost(
+                        new JsonRpcAppServerDispatcher(appServer),
+                        serverInput,
+                        serverToClient).run();
+            }
+            catch (Throwable throwable) {
+                hostFailure.set(throwable);
+            }
+        }, "test-jsonrpc-appserver-host-diagnostics");
+        hostThread.setDaemon(true);
+        hostThread.start();
+
+        CodexCliDiagnosticsProperties diagnosticsProperties = new CodexCliDiagnosticsProperties();
+        diagnosticsProperties.setEnabled(true);
+        diagnosticsProperties.setDirectory(workspaceRoot.resolve("diagnostics").toString());
+        CliDiagnosticsSession diagnostics = CliDiagnosticsSession.open(diagnosticsProperties);
+        Path sessionDirectory = diagnostics.sessionDirectory().orElseThrow();
+
+        try (JsonRpcCodexAppServerSession session = new JsonRpcCodexAppServerSession(
+                clientInput,
+                clientToServer,
+                () -> {
+                    clientToServer.close();
+                    hostThread.join(1_000);
+                    clientInput.close();
+                },
+                Duration.ofSeconds(3),
+                diagnostics)) {
+            session.initialize(new InitializeParams(
+                    new AppServerClientInfo("transport-client", "Transport Client", "1.0.0"),
+                    new AppServerCapabilities(false, List.of())));
+            session.initialized(new InitializedNotification());
+            ThreadId threadId = session.threadStart(new ThreadStartParams("Diagnostics thread")).thread().threadId();
+            assertNotNull(threadId);
+        }
+        finally {
+            diagnostics.close();
+        }
+
+        hostThread.join(1_000);
+        String sessionLog = Files.readString(sessionDirectory.resolve("session.log"));
+        assertTrue(sessionLog.contains("jsonrpc request method=initialize"));
+        assertTrue(sessionLog.contains("jsonrpc response id="));
+        assertTrue(sessionLog.contains("jsonrpc notification direction=received method=thread/started"));
+        assertNull(hostFailure.get(), "Host failed: " + hostFailure.get());
+    }
 
     @Test
     void sessionHandlesInitializeThreadTurnAndNotificationsAcrossStdioTransport() throws Exception {

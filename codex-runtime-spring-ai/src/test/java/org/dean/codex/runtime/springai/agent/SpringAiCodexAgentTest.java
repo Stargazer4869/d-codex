@@ -2,6 +2,8 @@ package org.dean.codex.runtime.springai.agent;
 
 import org.dean.codex.core.approval.CommandApprovalService;
 import org.dean.codex.core.agent.AgentControl;
+import org.dean.codex.core.agent.MailboxTurnMessage;
+import org.dean.codex.core.agent.TurnControl;
 import org.dean.codex.core.context.ContextManager;
 import org.dean.codex.core.context.ThreadContextReconstructionService;
 import org.dean.codex.core.conversation.InMemoryConversationStore;
@@ -49,6 +51,8 @@ import org.dean.codex.protocol.tool.WebSearchResult;
 import org.dean.codex.protocol.item.CollabToolCallItem;
 import org.dean.codex.protocol.item.CollabToolCallStatus;
 import org.dean.codex.protocol.item.AgentMessageItem;
+import org.dean.codex.protocol.item.MailboxDeliveryKind;
+import org.dean.codex.protocol.item.MailboxMessageItem;
 import org.dean.codex.protocol.item.RawModelOutputItem;
 import org.dean.codex.protocol.item.ReasoningItem;
 import org.dean.codex.protocol.item.ToolCallItem;
@@ -251,6 +255,71 @@ class SpringAiCodexAgentTest {
         assertNotNull(request);
         assertEquals("high", request.reasoningConfig().effort());
         assertEquals("detailed", request.reasoningConfig().summaryMode());
+    }
+
+    @Test
+    void handleTurnEmitsMailboxMessagesDrainedFromTurnControl() {
+        RecordingResponsesModelClient modelClient = new RecordingResponsesModelClient("""
+                {
+                  "summary": "Done",
+                  "finalAnswer": "Finished"
+                }
+                """);
+        SpringAiCodexAgent responsesAgent = new SpringAiCodexAgent(
+                modelClient,
+                path -> new FileReadResult(true, path, "", false, 0, ""),
+                (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                (path, maxDepth) -> new ListDirResult(true, path, maxDepth == null ? 1 : maxDepth, List.of(), 0, false, ""),
+                new NoOpWebSearchTool(),
+                (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
+                (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
+                new StubShellCommandTool(),
+                new NoOpExecCommandTool(),
+                new NoOpCommandApprovalService(),
+                new NoOpAgentControl(),
+                new FixedThreadContextReconstructionService(smallPromptContext()),
+                new NoOpContextManager(),
+                new NoOpSkillService(),
+                Path.of("/tmp/workspace"),
+                defaultModelProperties()
+        );
+        List<TurnItem> streamedItems = new ArrayList<>();
+        Instant mailboxTime = Instant.parse("2026-04-01T00:10:00Z");
+
+        CodexTurnResult result = responsesAgent.handleTurn(
+                new ThreadId("thread-parent"),
+                new TurnId("turn-parent"),
+                "Summarize the child result",
+                streamedItems::add,
+                new TurnControl() {
+                    private boolean drained;
+
+                    @Override
+                    public List<MailboxTurnMessage> drainMailboxMessages() {
+                        if (drained) {
+                            return List.of();
+                        }
+                        drained = true;
+                        return List.of(new MailboxTurnMessage(
+                                new ThreadId("thread-agent"),
+                                new ThreadId("thread-parent"),
+                                MailboxDeliveryKind.CHILD_COMPLETION,
+                                "Sub-agent worker-1 completed. Final answer:\nREADME reviewed",
+                                mailboxTime));
+                    }
+                });
+
+        MailboxMessageItem mailboxItem = streamedItems.stream()
+                .filter(MailboxMessageItem.class::isInstance)
+                .map(MailboxMessageItem.class::cast)
+                .findFirst()
+                .orElseThrow();
+        assertEquals(new ThreadId("thread-agent"), mailboxItem.senderThreadId());
+        assertEquals(new ThreadId("thread-parent"), mailboxItem.receiverThreadId());
+        assertEquals(MailboxDeliveryKind.CHILD_COMPLETION, mailboxItem.deliveryKind());
+        assertEquals("Sub-agent worker-1 completed. Final answer:\nREADME reviewed", mailboxItem.text());
+        assertEquals(mailboxTime, mailboxItem.createdAt());
+        assertEquals("Finished", result.finalAnswer());
     }
 
     @Test
@@ -1324,6 +1393,177 @@ class SpringAiCodexAgentTest {
     }
 
     @Test
+    void handleTurnAllowsConcurrentTurnsOnSameAgentInstance() throws Exception {
+        BlockingResponsesModelClient responsesModelClient = new BlockingResponsesModelClient();
+        SpringAiCodexAgent concurrentAgent = new SpringAiCodexAgent(
+                responsesModelClient,
+                path -> new FileReadResult(true, path, "", false, 0, ""),
+                (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                new NoOpListDirTool(),
+                new NoOpWebSearchTool(),
+                (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
+                (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
+                new StubShellCommandTool(),
+                new NoOpExecCommandTool(),
+                new NoOpCommandApprovalService(),
+                new NoOpAgentControl(),
+                new NoOpThreadContextReconstructionService(),
+                new NoOpContextManager(),
+                new NoOpSkillService(),
+                Path.of("/tmp/workspace"),
+                codexProperties(2, 1, 0, 0));
+
+        CompletableFuture<CodexTurnResult> firstTurn = CompletableFuture.supplyAsync(() ->
+                concurrentAgent.handleTurn(new ThreadId("thread-1"), new TurnId("turn-1"), "first request"));
+        assertTrue(responsesModelClient.firstRequestStarted.await(2, TimeUnit.SECONDS));
+
+        CompletableFuture<CodexTurnResult> secondTurn = CompletableFuture.supplyAsync(() ->
+                concurrentAgent.handleTurn(new ThreadId("thread-2"), new TurnId("turn-2"), "second request"));
+        assertTrue(responsesModelClient.secondRequestStarted.await(2, TimeUnit.SECONDS));
+
+        responsesModelClient.releaseFirstResponse.countDown();
+
+        assertEquals(TurnStatus.COMPLETED, firstTurn.join().status());
+        assertEquals(TurnStatus.COMPLETED, secondTurn.join().status());
+    }
+
+    @Test
+    void executeActionsDoesNotReassignRunningAgentWithoutInterrupt() {
+        RecordingAgentControl agentControl = new RecordingAgentControl();
+        agentControl.listedAgentStatus = AgentStatus.RUNNING;
+        SpringAiCodexAgent agent = new SpringAiCodexAgent(
+                new RecordingResponsesModelClient("{\"summary\":\"Done\",\"finalAnswer\":\"Finished\"}"),
+                path -> new FileReadResult(true, path, "", false, 0, ""),
+                (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                new NoOpListDirTool(),
+                new NoOpWebSearchTool(),
+                (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
+                (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
+                new StubShellCommandTool(),
+                new NoOpExecCommandTool(),
+                new NoOpCommandApprovalService(),
+                agentControl,
+                new NoOpThreadContextReconstructionService(),
+                new NoOpContextManager(),
+                new NoOpSkillService(),
+                Path.of("/tmp/workspace"),
+                codexProperties(2, 1, 0, 0));
+
+        SpringAiCodexAgent.PlannerStep step = agent.parseDecision("""
+                {
+                  "summary": "Assign running helper",
+                  "actions": [
+                    {
+                      "action": "assign_task",
+                      "threadId": "agent-1",
+                      "content": "continue"
+                    }
+                  ]
+                }
+                """);
+
+        SpringAiCodexAgent.BatchExecutionOutcome outcome = agent.executeActions(
+                new ThreadId("thread-parent"),
+                new TurnId("turn-1"),
+                step.actions(),
+                new ArrayList<>(),
+                null);
+
+        assertNull(agentControl.assignTaskThreadId);
+        assertTrue(outcome.observation().contains("\"success\":false"));
+        assertTrue(outcome.observation().contains("\"recommendedNextAction\":\"wait_agent\""));
+        assertTrue(outcome.observation().contains("\"status\":\"RUNNING\""));
+    }
+
+    @Test
+    void executeActionsUsesLongerDefaultWaitForAgentPolling() {
+        RecordingAgentControl agentControl = new RecordingAgentControl();
+        SpringAiCodexAgent agent = new SpringAiCodexAgent(
+                new RecordingResponsesModelClient("{\"summary\":\"Done\",\"finalAnswer\":\"Finished\"}"),
+                path -> new FileReadResult(true, path, "", false, 0, ""),
+                (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                new NoOpListDirTool(),
+                new NoOpWebSearchTool(),
+                (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
+                (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
+                new StubShellCommandTool(),
+                new NoOpExecCommandTool(),
+                new NoOpCommandApprovalService(),
+                agentControl,
+                new NoOpThreadContextReconstructionService(),
+                new NoOpContextManager(),
+                new NoOpSkillService(),
+                Path.of("/tmp/workspace"),
+                codexProperties(2, 1, 0, 0));
+
+        SpringAiCodexAgent.PlannerStep step = agent.parseDecision("""
+                {
+                  "summary": "Wait for helper",
+                  "actions": [
+                    {
+                      "action": "wait_agent",
+                      "threadIds": ["agent-1"]
+                    }
+                  ]
+                }
+                """);
+
+        SpringAiCodexAgent.BatchExecutionOutcome outcome = agent.executeActions(
+                new ThreadId("thread-parent"),
+                new TurnId("turn-1"),
+                step.actions(),
+                new ArrayList<>(),
+                null);
+
+        assertEquals(5_000L, agentControl.waitTimeoutMillis);
+        assertTrue(outcome.observation().contains("\"recommendedNextAction\":\"use_final_answer\""));
+        assertTrue(outcome.observation().contains("\"shouldUseFinalAnswer\":true"));
+    }
+
+    @Test
+    void executeActionsResolvesAgentSelectorsByNickname() {
+        RecordingAgentControl agentControl = new RecordingAgentControl();
+        SpringAiCodexAgent agent = new SpringAiCodexAgent(
+                new RecordingResponsesModelClient("{\"summary\":\"Done\",\"finalAnswer\":\"Finished\"}"),
+                path -> new FileReadResult(true, path, "", false, 0, ""),
+                (query, scope) -> new FileSearchResult(true, query, scope, List.of(), 0, false, ""),
+                new NoOpListDirTool(),
+                new NoOpWebSearchTool(),
+                (path, oldText, newText, replaceAll) -> new FilePatchResult(true, path, 1, 0, ""),
+                (path, content) -> new FileWriteResult(true, path, true, content == null ? 0 : content.length(), ""),
+                new StubShellCommandTool(),
+                new NoOpExecCommandTool(),
+                new NoOpCommandApprovalService(),
+                agentControl,
+                new NoOpThreadContextReconstructionService(),
+                new NoOpContextManager(),
+                new NoOpSkillService(),
+                Path.of("/tmp/workspace"),
+                codexProperties(2, 1, 0, 0));
+
+        SpringAiCodexAgent.PlannerStep step = agent.parseDecision("""
+                {
+                  "summary": "Wait for helper",
+                  "actions": [
+                    {
+                      "action": "wait_agent",
+                      "threadIds": ["inspector"]
+                    }
+                  ]
+                }
+                """);
+
+        agent.executeActions(
+                new ThreadId("thread-parent"),
+                new TurnId("turn-1"),
+                step.actions(),
+                new ArrayList<>(),
+                null);
+
+        assertEquals(List.of(new ThreadId("agent-1")), agentControl.waitThreadIds);
+    }
+
+    @Test
     void handleTurnRoutesUnifiedExecActionsThroughExecCommandTool() {
         RecordingExecCommandTool execCommandTool = new RecordingExecCommandTool();
         SpringAiCodexAgent agent = new ScriptedSpringAiCodexAgent(
@@ -1675,6 +1915,51 @@ class SpringAiCodexAgentTest {
         }
     }
 
+    private static final class BlockingResponsesModelClient implements ResponsesModelClient {
+
+        private final CountDownLatch firstRequestStarted = new CountDownLatch(1);
+        private final CountDownLatch secondRequestStarted = new CountDownLatch(1);
+        private final CountDownLatch releaseFirstResponse = new CountDownLatch(1);
+        private final AtomicInteger requestCount = new AtomicInteger();
+
+        @Override
+        public org.dean.codex.core.model.ModelResponse complete(ModelRequest request, Consumer<ModelOutputItem> outputItemConsumer) {
+            int requestNumber = requestCount.incrementAndGet();
+            if (requestNumber == 1) {
+                firstRequestStarted.countDown();
+                awaitLatch(releaseFirstResponse);
+            }
+            else if (requestNumber == 2) {
+                secondRequestStarted.countDown();
+            }
+
+            String assistantText = """
+                    {
+                      "summary": "Done",
+                      "finalAnswer": "completed %d"
+                    }
+                    """.formatted(requestNumber);
+            org.dean.codex.core.model.ModelAssistantMessageItem messageItem =
+                    new org.dean.codex.core.model.ModelAssistantMessageItem("response-" + requestNumber, assistantText);
+            if (outputItemConsumer != null) {
+                outputItemConsumer.accept(messageItem);
+            }
+            return new org.dean.codex.core.model.ModelResponse(
+                    new org.dean.codex.core.model.ModelResponseMetadata("response-" + requestNumber, "", "completed"),
+                    List.of(messageItem));
+        }
+
+        private void awaitLatch(CountDownLatch latch) {
+            try {
+                assertTrue(latch.await(2, TimeUnit.SECONDS));
+            }
+            catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError(exception);
+            }
+        }
+    }
+
     private static final class InMemoryThreadModelSessionStateStore implements ThreadModelSessionStateStore {
 
         private final java.util.Map<ThreadId, ThreadModelSessionSnapshot> snapshots = new java.util.HashMap<>();
@@ -1982,6 +2267,7 @@ class SpringAiCodexAgentTest {
         private ThreadId closeThreadId;
         private ThreadId listAgentsParentThreadId;
         private boolean listAgentsRecursive;
+        private AgentStatus listedAgentStatus = AgentStatus.IDLE;
 
         @Override
         public AgentSummary spawnAgent(AgentSpawnRequest request) {
@@ -2038,7 +2324,7 @@ class SpringAiCodexAgentTest {
             this.listAgentsParentThreadId = parentThreadId;
             this.listAgentsRecursive = recursive;
             return List.of(
-                    new AgentSummary(new ThreadId("agent-1"), parentThreadId, "inspector", "reviewer", "subdir", 1, AgentStatus.IDLE, Instant.parse("2026-04-01T00:00:00Z"), Instant.parse("2026-04-01T00:01:00Z"), null));
+                    new AgentSummary(new ThreadId("agent-1"), parentThreadId, "inspector", "reviewer", "subdir", 1, listedAgentStatus, Instant.parse("2026-04-01T00:00:00Z"), Instant.parse("2026-04-01T00:01:00Z"), null));
         }
     }
 

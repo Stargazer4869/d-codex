@@ -52,6 +52,11 @@ class DefaultCommandApprovalServiceTest {
                 .filter(ApprovalItem.class::isInstance)
                 .map(ApprovalItem.class::cast)
                 .anyMatch(item -> item.state() == ApprovalState.RESULT));
+        assertTrue(conversationStore.turns(threadId).get(0).items().stream()
+                .filter(ApprovalItem.class::isInstance)
+                .map(ApprovalItem.class::cast)
+                .filter(item -> item.state() == ApprovalState.RESULT)
+                .anyMatch(item -> item.detail().contains("stdout=ok")));
         assertEquals(2, historyStore.read(threadId).size());
         assertTrue(historyStore.read(threadId).stream().allMatch(HistoryApprovalItem.class::isInstance));
     }

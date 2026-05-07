@@ -1,5 +1,6 @@
 package org.dean.codex.runtime.springai.runtime;
 
+import org.dean.codex.core.agent.MailboxTurnMessage;
 import org.dean.codex.core.agent.TurnExecutor;
 import org.dean.codex.core.agent.TurnControl;
 import org.dean.codex.core.context.ContextManager;
@@ -557,7 +558,7 @@ class DefaultCodexRuntimeGatewayTest {
         var agent = gateway.spawnAgent(new AgentSpawnRequest(
                 parentThreadId,
                 "root/worker-1",
-                "Investigate the failing tests",
+                null,
                 "worker-1",
                 "worker",
                 null,
@@ -574,7 +575,136 @@ class DefaultCodexRuntimeGatewayTest {
         assertFalse(waitResult.timedOut());
         assertEquals("Agent mailbox updated.", waitResult.message());
         assertNotNull(waitResult.mailbox());
-        assertTrue(waitResult.mailbox().sequence() >= 2);
+        assertTrue(waitResult.mailbox().sequence() >= 1);
+    }
+
+    @Test
+    void waitAgentReturnsImmediatelyWhenCompletedChildResultAlreadyExists() {
+        ConversationStore conversationStore = new InMemoryConversationStore();
+        DefaultCodexRuntimeGateway gateway = new DefaultCodexRuntimeGateway(
+                conversationStore,
+                new DelayedCompletingTurnExecutor(conversationStore, 10),
+                new NoOpContextManager(),
+                new NoOpThreadContextReconstructionService(),
+                null,
+                new NoOpSkillService(),
+                4);
+        ThreadId parentThreadId = gateway.threadStart("Parent thread").threadId();
+
+        var agent = gateway.spawnAgent(new AgentSpawnRequest(
+                parentThreadId,
+                "root/worker-1",
+                "Investigate the failing tests",
+                "worker-1",
+                "worker",
+                null,
+                null,
+                null,
+                null));
+        awaitAgentStatus(gateway, agent.threadId(), AgentStatus.IDLE);
+
+        var waitResult = gateway.waitAgent(List.of(agent.threadId()), 1000);
+
+        assertFalse(waitResult.timedOut());
+        assertTrue(waitResult.message().equals("Agent already has a completed turn result.")
+                || waitResult.message().equals("Agent produced a new turn result."));
+        assertEquals("handled: Investigate the failing tests", waitResult.finalAnswer());
+    }
+
+    @Test
+    void waitAgentReturnsCompletedChildFinalAnswer() {
+        ConversationStore conversationStore = new InMemoryConversationStore();
+        DefaultCodexRuntimeGateway gateway = new DefaultCodexRuntimeGateway(
+                conversationStore,
+                new DelayedCompletingTurnExecutor(conversationStore, 150),
+                new NoOpContextManager(),
+                new NoOpThreadContextReconstructionService(),
+                null,
+                new NoOpSkillService(),
+                4);
+        ThreadId parentThreadId = gateway.threadStart("Parent thread").threadId();
+
+        var agent = gateway.spawnAgent(new AgentSpawnRequest(
+                parentThreadId,
+                "root/worker-1",
+                "Investigate the failing tests",
+                "worker-1",
+                "worker",
+                null,
+                null,
+                null,
+                null));
+
+        var waitResult = gateway.waitAgent(List.of(agent.threadId()), 1000);
+
+        assertFalse(waitResult.timedOut());
+        assertEquals("Agent produced a new turn result.", waitResult.message());
+        assertEquals("handled: Investigate the failing tests", waitResult.finalAnswer());
+    }
+
+    @Test
+    void activeParentTurnCanDrainChildCompletionMailboxMessage() throws Exception {
+        ConversationStore conversationStore = new InMemoryConversationStore();
+        DefaultCodexRuntimeGateway gateway = new DefaultCodexRuntimeGateway(
+                conversationStore,
+                new MailboxAwareTurnExecutor(conversationStore),
+                new NoOpContextManager(),
+                new NoOpThreadContextReconstructionService(),
+                null,
+                new NoOpSkillService(),
+                4);
+        ThreadId parentThreadId = gateway.threadStart("Parent thread").threadId();
+
+        RuntimeTurn parentTurn = gateway.turnStart(parentThreadId, "await child");
+        gateway.spawnAgent(new AgentSpawnRequest(
+                parentThreadId,
+                "root/worker-1",
+                "Investigate the failing tests",
+                "worker-1",
+                "worker",
+                null,
+                null,
+                null,
+                null));
+
+        awaitTurnStatus(conversationStore, parentThreadId, parentTurn.turnId(), TurnStatus.COMPLETED);
+        ConversationTurn storedTurn = conversationStore.turn(parentThreadId, parentTurn.turnId());
+
+        assertTrue(storedTurn.finalAnswer().contains("Sub-agent worker-1 completed."));
+        assertTrue(storedTurn.finalAnswer().contains("handled: Investigate the failing tests"));
+    }
+
+    @Test
+    void idleParentReceivesChildCompletionMailboxMessageOnNextTurn() throws Exception {
+        ConversationStore conversationStore = new InMemoryConversationStore();
+        DefaultCodexRuntimeGateway gateway = new DefaultCodexRuntimeGateway(
+                conversationStore,
+                new MailboxAwareTurnExecutor(conversationStore),
+                new NoOpContextManager(),
+                new NoOpThreadContextReconstructionService(),
+                null,
+                new NoOpSkillService(),
+                4);
+        ThreadId parentThreadId = gateway.threadStart("Parent thread").threadId();
+
+        var agent = gateway.spawnAgent(new AgentSpawnRequest(
+                parentThreadId,
+                "root/worker-1",
+                "Investigate the failing tests",
+                "worker-1",
+                "worker",
+                null,
+                null,
+                null,
+                null));
+        awaitAgentStatus(gateway, agent.threadId(), AgentStatus.IDLE);
+
+        RuntimeTurn parentTurn = gateway.turnStart(parentThreadId, "await child");
+        awaitTurnStatus(conversationStore, parentThreadId, parentTurn.turnId(), TurnStatus.COMPLETED);
+        ConversationTurn storedTurn = conversationStore.turn(parentThreadId, parentTurn.turnId());
+
+        assertTrue(storedTurn.finalAnswer().contains("Sub-agent worker-1 completed."));
+        assertTrue(storedTurn.finalAnswer().contains("handled: Investigate the failing tests"));
     }
 
     @Test
@@ -996,6 +1126,49 @@ class DefaultCodexRuntimeGatewayTest {
         }
     }
 
+    private static final class DelayedCompletingTurnExecutor implements TurnExecutor {
+
+        private final ConversationStore store;
+        private final long delayMillis;
+
+        private DelayedCompletingTurnExecutor(ConversationStore store, long delayMillis) {
+            this.store = store;
+            this.delayMillis = delayMillis;
+        }
+
+        @Override
+        public CodexTurnResult executeTurn(ThreadId threadId, String input) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public CodexTurnResult executeTurn(ThreadId threadId,
+                                           TurnId turnId,
+                                           String input,
+                                           Consumer<TurnItem> itemConsumer,
+                                           TurnControl turnControl) {
+            try {
+                Thread.sleep(delayMillis);
+            }
+            catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+            }
+            AgentMessageItem assistant = new AgentMessageItem(
+                    new ItemId("delayed-assistant-" + turnId.value()),
+                    "handled: " + input,
+                    Instant.now());
+            store.appendTurnItems(threadId, turnId, List.of(assistant));
+            itemConsumer.accept(assistant);
+            store.completeTurn(threadId, turnId, TurnStatus.COMPLETED, assistant.text(), Instant.now());
+            return new CodexTurnResult(threadId, turnId, TurnStatus.COMPLETED, List.of(assistant), assistant.text());
+        }
+
+        @Override
+        public CodexTurnResult resumeTurn(ThreadId threadId, TurnId turnId) {
+            throw new UnsupportedOperationException();
+        }
+    }
+
     private static final class SteeringTurnExecutor implements TurnExecutor {
 
         private final ConversationStore store;
@@ -1074,6 +1247,74 @@ class DefaultCodexRuntimeGatewayTest {
             threadHistoryStore.append(threadId, ThreadHistoryMapper.map(turnId, List.of(userMessageItem, assistantMessageItem)));
             conversationStore.completeTurn(threadId, turnId, TurnStatus.COMPLETED, "handled: " + input, now.plusSeconds(2));
             return new CodexTurnResult(threadId, turnId, TurnStatus.COMPLETED, List.of(userMessageItem, assistantMessageItem), "handled: " + input);
+        }
+
+        @Override
+        public CodexTurnResult resumeTurn(ThreadId threadId, TurnId turnId) {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    private static final class MailboxAwareTurnExecutor implements TurnExecutor {
+
+        private final ConversationStore store;
+
+        private MailboxAwareTurnExecutor(ConversationStore store) {
+            this.store = store;
+        }
+
+        @Override
+        public CodexTurnResult executeTurn(ThreadId threadId, String input) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public CodexTurnResult executeTurn(ThreadId threadId,
+                                           TurnId turnId,
+                                           String input,
+                                           Consumer<TurnItem> itemConsumer,
+                                           TurnControl turnControl) {
+            if ("await child".equals(input)) {
+                List<MailboxTurnMessage> mailboxMessages = waitForMailboxMessages(turnControl);
+                String finalAnswer = mailboxMessages.isEmpty()
+                        ? "No mailbox messages received."
+                        : mailboxMessages.stream().map(MailboxTurnMessage::text).collect(java.util.stream.Collectors.joining("\n\n"));
+                AgentMessageItem assistant = new AgentMessageItem(
+                        new ItemId("mailbox-assistant-" + turnId.value()),
+                        finalAnswer,
+                        Instant.now());
+                store.appendTurnItems(threadId, turnId, List.of(assistant));
+                itemConsumer.accept(assistant);
+                store.completeTurn(threadId, turnId, TurnStatus.COMPLETED, finalAnswer, Instant.now());
+                return new CodexTurnResult(threadId, turnId, TurnStatus.COMPLETED, List.of(assistant), finalAnswer);
+            }
+
+            AgentMessageItem assistant = new AgentMessageItem(
+                    new ItemId("child-assistant-" + turnId.value()),
+                    "handled: " + input,
+                    Instant.now());
+            store.appendTurnItems(threadId, turnId, List.of(assistant));
+            itemConsumer.accept(assistant);
+            store.completeTurn(threadId, turnId, TurnStatus.COMPLETED, assistant.text(), Instant.now());
+            return new CodexTurnResult(threadId, turnId, TurnStatus.COMPLETED, List.of(assistant), assistant.text());
+        }
+
+        private List<MailboxTurnMessage> waitForMailboxMessages(TurnControl turnControl) {
+            long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (System.nanoTime() < deadlineNanos) {
+                List<MailboxTurnMessage> mailboxMessages = turnControl.drainMailboxMessages();
+                if (!mailboxMessages.isEmpty()) {
+                    return mailboxMessages;
+                }
+                try {
+                    Thread.sleep(10);
+                }
+                catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            return List.of();
         }
 
         @Override

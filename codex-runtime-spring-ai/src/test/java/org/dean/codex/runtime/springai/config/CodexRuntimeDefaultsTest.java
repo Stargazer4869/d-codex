@@ -20,6 +20,8 @@ class CodexRuntimeDefaultsTest {
         assertTrue(yaml.contains("emit-raw-output-items: ${CODEX_EMIT_RAW_OUTPUT_ITEMS:false}"));
         assertTrue(yaml.contains("reasoning-effort: ${CODEX_REASONING_EFFORT:}"));
         assertTrue(yaml.contains("reasoning-summary-mode: ${CODEX_REASONING_SUMMARY_MODE:}"));
+        assertTrue(yaml.contains("DnsServerAddressStreamProviders: ERROR"));
+        assertTrue(yaml.contains("OpenAiResponseHeaderExtractor: ERROR"));
         assertTrue(yaml.contains("base-instructions-text: ${CODEX_BASE_INSTRUCTIONS_TEXT:}"));
         assertTrue(yaml.contains("base-instructions-file: ${CODEX_BASE_INSTRUCTIONS_FILE:}"));
         assertTrue(yaml.contains("project-instructions-text: ${CODEX_PROJECT_INSTRUCTIONS_TEXT:}"));

@@ -10,12 +10,13 @@ import org.springframework.context.annotation.Primary;
 
 @Configuration
 @ConditionalOnProperty(name = "codex.cli.enabled", havingValue = "true", matchIfMissing = true)
-@EnableConfigurationProperties(CodexCliAppServerProperties.class)
+@EnableConfigurationProperties({CodexCliAppServerProperties.class, CodexCliDiagnosticsProperties.class})
 public class CodexCliAppServerConfig {
 
     @Bean
     @Primary
-    public CodexAppServer codexAppServer(CodexCliAppServerProperties properties) {
-        return new StdioProcessCodexAppServer(properties);
+    public CodexAppServer codexAppServer(CodexCliAppServerProperties properties,
+                                         CodexCliDiagnosticsProperties diagnosticsProperties) {
+        return new StdioProcessCodexAppServer(properties, diagnosticsProperties);
     }
 }

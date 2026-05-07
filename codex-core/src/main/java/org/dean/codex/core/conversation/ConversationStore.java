@@ -4,6 +4,7 @@ import org.dean.codex.protocol.conversation.ConversationMessage;
 import org.dean.codex.protocol.conversation.ConversationTurn;
 import org.dean.codex.protocol.appserver.ThreadForkParams;
 import org.dean.codex.protocol.conversation.ThreadId;
+import org.dean.codex.protocol.conversation.ThreadSource;
 import org.dean.codex.protocol.conversation.ThreadSummary;
 import org.dean.codex.protocol.conversation.TurnId;
 import org.dean.codex.protocol.conversation.TurnStatus;
@@ -47,7 +48,7 @@ public interface ConversationStore {
                                                String model,
                                                String sandboxMode,
                                                String approvalMode) {
-        return updateThreadMetadata(threadId, cwd, modelProvider, model, sandboxMode, approvalMode, null, null, null, null);
+        return updateThreadMetadata(threadId, cwd, modelProvider, model, sandboxMode, approvalMode, null, null, null, null, null);
     }
 
     default ThreadSummary updateThreadMetadata(ThreadId threadId,
@@ -60,6 +61,20 @@ public interface ConversationStore {
                                                String gitBranch,
                                                String gitOriginUrl,
                                                String cliVersion) {
+        return updateThreadMetadata(threadId, cwd, modelProvider, model, sandboxMode, approvalMode, gitSha, gitBranch, gitOriginUrl, cliVersion, null);
+    }
+
+    default ThreadSummary updateThreadMetadata(ThreadId threadId,
+                                               String cwd,
+                                               String modelProvider,
+                                               String model,
+                                               String sandboxMode,
+                                               String approvalMode,
+                                               String gitSha,
+                                               String gitBranch,
+                                               String gitOriginUrl,
+                                               String cliVersion,
+                                               ThreadSource source) {
         return updateThreadMetadata(threadId, cwd, modelProvider, model);
     }
 

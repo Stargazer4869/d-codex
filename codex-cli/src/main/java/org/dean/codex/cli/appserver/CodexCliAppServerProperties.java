@@ -16,6 +16,8 @@ public class CodexCliAppServerProperties {
     private static final String ROOT_LOGGING_OVERRIDE = "--logging.level.root=OFF";
     private static final String CODEX_LOGGING_OVERRIDE = "--logging.level.org.dean.codex=OFF";
     private static final String SIMPLE_LOGGER_ADVISOR_OVERRIDE = "--logging.level.org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor=OFF";
+    private static final String NETTY_DNS_LOGGING_OVERRIDE = "--logging.level.io.netty.resolver.dns.DnsServerAddressStreamProviders=OFF";
+    private static final String OPENAI_HEADER_LOGGING_OVERRIDE = "--logging.level.org.springframework.ai.openai.metadata.support.OpenAiResponseHeaderExtractor=OFF";
     private static final String SPRING_BOOT_JAR_LAUNCHER = "org.springframework.boot.loader.launch.JarLauncher";
 
     private List<String> command = List.of();
@@ -82,6 +84,8 @@ public class CodexCliAppServerProperties {
         generatedCommand.add(ROOT_LOGGING_OVERRIDE);
         generatedCommand.add(CODEX_LOGGING_OVERRIDE);
         generatedCommand.add(SIMPLE_LOGGER_ADVISOR_OVERRIDE);
+        generatedCommand.add(NETTY_DNS_LOGGING_OVERRIDE);
+        generatedCommand.add(OPENAI_HEADER_LOGGING_OVERRIDE);
         return List.copyOf(generatedCommand);
     }
 
@@ -96,6 +100,8 @@ public class CodexCliAppServerProperties {
         generatedCommand.add(ROOT_LOGGING_OVERRIDE);
         generatedCommand.add(CODEX_LOGGING_OVERRIDE);
         generatedCommand.add(SIMPLE_LOGGER_ADVISOR_OVERRIDE);
+        generatedCommand.add(NETTY_DNS_LOGGING_OVERRIDE);
+        generatedCommand.add(OPENAI_HEADER_LOGGING_OVERRIDE);
         return List.copyOf(generatedCommand);
     }
 

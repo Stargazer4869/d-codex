@@ -369,7 +369,7 @@ class StdioJsonRpcAppServerHostTest {
                 throw new IllegalStateException("Already initialized");
             }
             initializeCalled = true;
-            return new InitializeResponse(params.clientInfo().name(), "/tmp/.codex-java", "desktop", "test");
+            return new InitializeResponse(params.clientInfo().name(), "/tmp/.d-codex", "desktop", "test");
         }
 
         @Override

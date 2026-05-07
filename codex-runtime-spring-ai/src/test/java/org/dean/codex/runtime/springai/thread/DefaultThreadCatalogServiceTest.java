@@ -11,6 +11,7 @@ import org.dean.codex.protocol.conversation.ThreadStatus;
 import org.dean.codex.protocol.conversation.ThreadSummary;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 
@@ -95,6 +96,51 @@ class DefaultThreadCatalogServiceTest {
 
         assertEquals(List.of(new ThreadId("thread-b"), new ThreadId("thread-d")),
                 secondPage.threads().stream().map(ThreadSummary::threadId).toList());
+    }
+
+    @Test
+    void normalizesRelativeCwdFiltersAgainstStoredAbsolutePaths() {
+        String cwd = Path.of("").toAbsolutePath().normalize().toString();
+        ThreadSummary thread = new ThreadSummary(
+                new ThreadId("thread-relative"),
+                "Relative cwd thread",
+                Instant.parse("2026-04-01T00:00:00Z"),
+                Instant.parse("2026-04-01T00:00:05Z"),
+                1,
+                "relative cwd",
+                "relative cwd",
+                "workspace-write",
+                "review-sensitive",
+                false,
+                "openai",
+                "gpt-5.4",
+                ThreadStatus.IDLE,
+                List.of(),
+                "/tmp/thread-relative",
+                cwd,
+                ThreadSource.CLI,
+                true,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                AgentStatus.IDLE,
+                null);
+
+        ThreadListResponse response = service.listThreads(List.of(thread), new ThreadListParams(
+                null,
+                10,
+                ThreadSortKey.UPDATED_AT,
+                null,
+                null,
+                Boolean.FALSE,
+                ".",
+                null));
+
+        assertEquals(1, response.threads().size());
+        assertEquals(thread.threadId(), response.threads().get(0).threadId());
     }
 
     private ThreadSummary summary(ThreadId threadId,

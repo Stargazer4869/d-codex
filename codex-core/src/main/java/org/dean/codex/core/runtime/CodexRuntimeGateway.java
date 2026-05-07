@@ -6,6 +6,7 @@ import org.dean.codex.protocol.context.ReconstructedThreadContext;
 import org.dean.codex.protocol.context.ThreadMemory;
 import org.dean.codex.protocol.conversation.ConversationTurn;
 import org.dean.codex.protocol.conversation.ThreadId;
+import org.dean.codex.protocol.conversation.ThreadSource;
 import org.dean.codex.protocol.conversation.ThreadSummary;
 import org.dean.codex.protocol.conversation.TurnId;
 import org.dean.codex.protocol.runtime.RuntimeNotification;
@@ -72,7 +73,7 @@ public interface CodexRuntimeGateway {
                                                String model,
                                                String sandboxMode,
                                                String approvalMode) {
-        return updateThreadMetadata(threadId, cwd, modelProvider, model, sandboxMode, approvalMode, null, null, null, null);
+        return updateThreadMetadata(threadId, cwd, modelProvider, model, sandboxMode, approvalMode, null, null, null, null, null);
     }
 
     default ThreadSummary updateThreadMetadata(ThreadId threadId,
@@ -85,6 +86,20 @@ public interface CodexRuntimeGateway {
                                                String gitBranch,
                                                String gitOriginUrl,
                                                String cliVersion) {
+        return updateThreadMetadata(threadId, cwd, modelProvider, model, sandboxMode, approvalMode, gitSha, gitBranch, gitOriginUrl, cliVersion, null);
+    }
+
+    default ThreadSummary updateThreadMetadata(ThreadId threadId,
+                                               String cwd,
+                                               String modelProvider,
+                                               String model,
+                                               String sandboxMode,
+                                               String approvalMode,
+                                               String gitSha,
+                                               String gitBranch,
+                                               String gitOriginUrl,
+                                               String cliVersion,
+                                               ThreadSource source) {
         throw new UnsupportedOperationException("thread/metadata/update is not implemented yet");
     }
 

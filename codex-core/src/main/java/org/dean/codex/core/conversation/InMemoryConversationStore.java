@@ -138,7 +138,7 @@ public class InMemoryConversationStore implements ConversationStore {
                                                            String model,
                                                            String sandboxMode,
                                                            String approvalMode) {
-        return updateThreadMetadata(threadId, cwd, modelProvider, model, sandboxMode, approvalMode, null, null, null, null);
+        return updateThreadMetadata(threadId, cwd, modelProvider, model, sandboxMode, approvalMode, null, null, null, null, null);
     }
 
     @Override
@@ -152,8 +152,23 @@ public class InMemoryConversationStore implements ConversationStore {
                                                            String gitBranch,
                                                            String gitOriginUrl,
                                                            String cliVersion) {
+        return updateThreadMetadata(threadId, cwd, modelProvider, model, sandboxMode, approvalMode, gitSha, gitBranch, gitOriginUrl, cliVersion, null);
+    }
+
+    @Override
+    public synchronized ThreadSummary updateThreadMetadata(ThreadId threadId,
+                                                           String cwd,
+                                                           String modelProvider,
+                                                           String model,
+                                                           String sandboxMode,
+                                                           String approvalMode,
+                                                           String gitSha,
+                                                           String gitBranch,
+                                                           String gitOriginUrl,
+                                                           String cliVersion,
+                                                           ThreadSource source) {
         ThreadRecord record = requireThread(threadId);
-        ThreadRecord updated = record.withMetadata(cwd, modelProvider, model, sandboxMode, approvalMode, gitSha, gitBranch, gitOriginUrl, cliVersion);
+        ThreadRecord updated = record.withMetadata(cwd, modelProvider, model, sandboxMode, approvalMode, gitSha, gitBranch, gitOriginUrl, cliVersion, source);
         threads.put(threadId, updated);
         return toThreadSummary(threadId, updated);
     }
@@ -641,7 +656,8 @@ public class InMemoryConversationStore implements ConversationStore {
                                           String newGitSha,
                                           String newGitBranch,
                                           String newGitOriginUrl,
-                                          String newCliVersion) {
+                                          String newCliVersion,
+                                          ThreadSource newSource) {
             return new ThreadRecord(
                     title,
                     threadId,
@@ -659,7 +675,7 @@ public class InMemoryConversationStore implements ConversationStore {
                     normalizeText(newModelProvider, modelProvider),
                     normalizeText(newModel, model),
                     normalizeText(newCwd, cwd),
-                    source,
+                    newSource == null ? source : newSource,
                     materialized,
                     archivedAt,
                     agentNickname,

@@ -18,9 +18,14 @@ This is not only about switching endpoints. It is about matching the runtime sha
 
 The reference point is the current upstream Codex implementation in `../../../codex`.
 
+Status note as of 2026-05-06:
+
+- this document is now best read as the internal runtime-shape parity plan
+- the concrete backend migration from the current chat-backed adapters to a native Responses HTTP/WebSocket transport is tracked separately in [`native-responses-backend-migration.md`](native-responses-backend-migration.md)
+
 ## Progress Tracker
 
-Overall status: `complete`
+Overall status: `complete for the internal runtime seam`
 
 ### Delivery phases
 
@@ -147,25 +152,25 @@ That is distinct from ordinary text generation and is part of the real runtime b
 
 ## Current Java State
 
-The Java rebuild has made good progress in adjacent areas, but it is still not Responses-native.
+The Java rebuild is now much closer to Responses-shaped internally, but the concrete backend is still not a native Responses transport.
 
 Current Java strengths:
 
 - layered prompt assembly via [`DefaultPromptAssemblyService.java`](../../codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/prompt/DefaultPromptAssemblyService.java)
-- a growing tool contract layer via [`DefaultToolContractResolver.java`](../../codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/prompt/DefaultToolContractResolver.java)
-- strong thread history and compaction work
-- unified exec sessions and streamed command notifications
+- transport seams via `ResponsesModelClient` and `ResponsesCompactClient`
+- typed `ModelInputItem` and `ModelOutputItem` abstractions
+- streamed runtime handling for assistant, reasoning, tool-call, and raw-output items
+- thread session-state persistence and inheritance seams
+- strong thread history, compaction, and unified-exec work
 
 Main remaining gaps:
 
-1. The model transport is still effectively chat-oriented.
-2. We do not have a first-class Java `ResponseItem` model for the planner/runtime path.
-3. Tool visibility is still partly rendered as prompt prose instead of fully transport-driven tool specs.
-4. We do not have a real streaming response-item interaction model for assistant/reasoning/tool updates.
-5. We do not preserve model reasoning items as first-class runtime records.
-6. Multimodal request items are not part of the core Java planner path.
-7. Session/turn routing metadata is not modeled like upstream Responses transport.
-8. Compaction parity exists behaviorally, but not through a Responses compact client surface.
+1. The configured runtime backend is still chat-backed through Spring AI adapters.
+2. Normal generation does not yet use a native `/v1/responses` HTTP or websocket transport.
+3. Session and response metadata are not yet sourced from real native Responses continuity.
+4. Compact transport is still chat-backed too.
+
+The follow-on concrete transport plan lives in [`native-responses-backend-migration.md`](native-responses-backend-migration.md).
 
 ## Design Principles
 

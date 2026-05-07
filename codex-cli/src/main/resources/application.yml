@@ -11,9 +11,12 @@ logging:
 
 codex:
   workspace-root: ${user.dir}
-  storage-root: ${user.home}/.codex-java
+  storage-root: ${CODEX_STORAGE_ROOT:${CODEX_HOME:${user.home}/.d-codex}}
   cli:
     show-tool-activity: ${CODEX_SHOW_TOOL_ACTIVITY:true}
+    diagnostics:
+      enabled: ${CODEX_CLI_DIAGNOSTICS_ENABLED:true}
+      directory: ${CODEX_CLI_DIAGNOSTICS_DIRECTORY:${codex.storage-root}/logs}
     app-server:
       main-class: ${CODEX_APP_SERVER_MAIN_CLASS:org.dean.codex.runtime.springai.appserver.CodexAppServerStdioApplication}
       request-timeout-seconds: ${CODEX_APP_SERVER_TIMEOUT_SECONDS:30}
@@ -22,7 +25,7 @@ codex:
     timeout-seconds: ${CODEX_SHELL_TIMEOUT_SECONDS:60}
   skills:
     enabled: ${CODEX_SKILLS_ENABLED:true}
-    user-root: ${CODEX_USER_SKILLS_ROOT:${user.home}/.codex/skills}
+    user-root: ${CODEX_USER_SKILLS_ROOT:}
     workspace-relative-root: ${CODEX_WORKSPACE_SKILLS_ROOT:.codex/skills}
   context:
     preserve-recent-turns: ${CODEX_CONTEXT_PRESERVE_RECENT_TURNS:4}

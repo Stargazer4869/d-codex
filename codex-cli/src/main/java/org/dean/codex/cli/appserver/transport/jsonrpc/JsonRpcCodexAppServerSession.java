@@ -142,17 +142,27 @@ public class JsonRpcCodexAppServerSession implements CodexAppServerSession {
     private final CopyOnWriteArrayList<Consumer<AppServerNotification>> listeners = new CopyOnWriteArrayList<>();
     private final Object writeMonitor = new Object();
     private final Thread readLoopThread;
+    private final CliDiagnosticsSession diagnostics;
     private volatile RuntimeException terminalFailure;
 
     public JsonRpcCodexAppServerSession(InputStream inputStream,
                                         OutputStream outputStream,
                                         AutoCloseable closeHook,
                                         Duration requestTimeout) {
+        this(inputStream, outputStream, closeHook, requestTimeout, CliDiagnosticsSession.disabled());
+    }
+
+    JsonRpcCodexAppServerSession(InputStream inputStream,
+                                 OutputStream outputStream,
+                                 AutoCloseable closeHook,
+                                 Duration requestTimeout,
+                                 CliDiagnosticsSession diagnostics) {
         this(OBJECT_MAPPER,
                 new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8)),
                 new BufferedWriter(new OutputStreamWriter(outputStream, StandardCharsets.UTF_8)),
                 closeHook,
-                requestTimeout);
+                requestTimeout,
+                diagnostics);
     }
 
     JsonRpcCodexAppServerSession(ObjectMapper objectMapper,
@@ -160,15 +170,26 @@ public class JsonRpcCodexAppServerSession implements CodexAppServerSession {
                                  BufferedWriter writer,
                                  AutoCloseable closeHook,
                                  Duration requestTimeout) {
+        this(objectMapper, reader, writer, closeHook, requestTimeout, CliDiagnosticsSession.disabled());
+    }
+
+    JsonRpcCodexAppServerSession(ObjectMapper objectMapper,
+                                 BufferedReader reader,
+                                 BufferedWriter writer,
+                                 AutoCloseable closeHook,
+                                 Duration requestTimeout,
+                                 CliDiagnosticsSession diagnostics) {
         this.objectMapper = objectMapper;
         this.reader = reader;
         this.writer = writer;
         this.closeHook = closeHook;
         this.requestTimeout = requestTimeout == null ? Duration.ofSeconds(30) : requestTimeout;
+        this.diagnostics = diagnostics == null ? CliDiagnosticsSession.disabled() : diagnostics;
         this.readLoopThread = new Thread(this::readLoop, "codex-cli-appserver-jsonrpc-read-loop");
         this.readLoopThread.setDaemon(true);
         this.readLoopThread.start();
         logger.debug("jsonrpc session started requestTimeoutMs={}", this.requestTimeout.toMillis());
+        this.diagnostics.recordLifecycle("jsonrpc session started requestTimeoutMs=" + this.requestTimeout.toMillis());
     }
 
     @Override
@@ -358,10 +379,12 @@ public class JsonRpcCodexAppServerSession implements CodexAppServerSession {
         closeHook.close();
         readLoopThread.join(1000);
         logger.debug("jsonrpc session closed");
+        diagnostics.recordLifecycle("jsonrpc session closed");
     }
 
     private void readLoop() {
         logger.debug("jsonrpc read loop started");
+        diagnostics.recordLifecycle("jsonrpc read loop started");
         try {
             String line;
             while ((line = reader.readLine()) != null) {
@@ -377,12 +400,15 @@ public class JsonRpcCodexAppServerSession implements CodexAppServerSession {
                         logger.debug("jsonrpc ignored stray stdout line rawChars={} head={}",
                                 line.length(),
                                 sanitizeLine(line));
+                        diagnostics.recordTransportLine("stdout-stray", line);
                         continue;
                     }
                     logger.debug("jsonrpc malformed line rawChars={} head={} parseError={}",
                             line.length(),
                             sanitizeLine(line),
                             parseException.getMessage());
+                    diagnostics.recordTransportLine("stdout-malformed", line);
+                    diagnostics.recordFailure("jsonrpc-parse", parseException);
                     throw parseException;
                 }
                 if (node.has("method") && !node.has("id")) {
@@ -390,6 +416,10 @@ public class JsonRpcCodexAppServerSession implements CodexAppServerSession {
                             node.path("method").asText(""),
                             notificationParamsType(node),
                             line.length());
+                    diagnostics.recordJsonRpcNotification(
+                            "received",
+                            node.path("method").asText(""),
+                            notificationParamsType(node));
                     handleNotification(node);
                     continue;
                 }
@@ -397,6 +427,11 @@ public class JsonRpcCodexAppServerSession implements CodexAppServerSession {
                 CompletableFuture<JsonRpcResponseMessage> responseFuture = pendingResponses.remove(idKey(response.id()));
                 if (responseFuture != null) {
                     logger.debug("jsonrpc response received id={} hasError={} hasResult={} pending={}",
+                            idKey(response.id()),
+                            response.error() != null,
+                            response.result() != null && !response.result().isNull(),
+                            pendingResponses.size());
+                    diagnostics.recordJsonRpcResponse(
                             idKey(response.id()),
                             response.error() != null,
                             response.result() != null && !response.result().isNull(),
@@ -415,6 +450,7 @@ public class JsonRpcCodexAppServerSession implements CodexAppServerSession {
         }
         finally {
             logger.debug("jsonrpc read loop stopped");
+            diagnostics.recordLifecycle("jsonrpc read loop stopped");
         }
     }
 
@@ -453,6 +489,11 @@ public class JsonRpcCodexAppServerSession implements CodexAppServerSession {
                 idKey,
                 params == null ? "(null)" : params.getClass().getSimpleName(),
                 pendingResponses.size());
+        diagnostics.recordJsonRpcRequest(
+                method,
+                idKey,
+                params == null ? "(null)" : params.getClass().getSimpleName(),
+                pendingResponses.size());
 
         try {
             write(new JsonRpcRequestMessage("2.0",
@@ -480,6 +521,7 @@ public class JsonRpcCodexAppServerSession implements CodexAppServerSession {
                 response.result() != null && !response.result().isNull(),
                 pendingResponses.size());
         if (response.error() != null) {
+            diagnostics.recordJsonRpcError(method, idKey, response.error());
             throw mapError(method, response.error());
         }
         if (resultType == Void.class) {
@@ -501,6 +543,10 @@ public class JsonRpcCodexAppServerSession implements CodexAppServerSession {
         ensureOpen();
         try {
             logger.debug("jsonrpc notification send method={} paramsType={}",
+                    method,
+                    params == null ? "(null)" : params.getClass().getSimpleName());
+            diagnostics.recordJsonRpcNotification(
+                    "sent",
                     method,
                     params == null ? "(null)" : params.getClass().getSimpleName());
             write(new JsonRpcRequestMessage("2.0",
@@ -581,6 +627,7 @@ public class JsonRpcCodexAppServerSession implements CodexAppServerSession {
                 failure.getMessage(),
                 failure.getClass().getSimpleName(),
                 exception);
+        diagnostics.recordFailure("jsonrpc-session", exception);
     }
 
     private String idKey(JsonNode id) {

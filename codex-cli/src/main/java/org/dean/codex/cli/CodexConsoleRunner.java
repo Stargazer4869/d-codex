@@ -80,6 +80,7 @@ import org.dean.codex.protocol.event.TurnEvent;
 import org.dean.codex.protocol.item.AgentMessageItem;
 import org.dean.codex.protocol.item.ApprovalItem;
 import org.dean.codex.protocol.item.CollabToolCallItem;
+import org.dean.codex.protocol.item.MailboxMessageItem;
 import org.dean.codex.protocol.item.PlanItem;
 import org.dean.codex.protocol.item.RawModelOutputItem;
 import org.dean.codex.protocol.item.ReasoningItem;
@@ -114,6 +115,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Scanner;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -133,6 +135,7 @@ public class CodexConsoleRunner implements CommandLineRunner {
     private final CodexAppServer codexAppServer;
     private final CommandApprovalService commandApprovalService;
     private final SlashCommandParser consoleCommandParser = new SlashCommandParser(CONSOLE_COMMAND_REGISTRY);
+    private final Set<String> suppressedCompactionNotificationIds = ConcurrentHashMap.newKeySet();
     private CodexAppServerSession appServerSession;
     private ThreadId activeThreadId;
     private int threadSequence = 1;
@@ -938,7 +941,12 @@ public class CodexConsoleRunner implements CommandLineRunner {
             session.attach(response.compaction());
             session.awaitCompletion();
             if (response.compaction() != null) {
-                printCompactionResponse(response.compaction(), response.threadMemory());
+                if (session.printedLifecycle()) {
+                    printCompactionCompatibilitySnapshot(response.threadMemory());
+                }
+                else {
+                    printCompactionResponse(response.compaction(), response.threadMemory());
+                }
             }
             else if (response.threadMemory() != null) {
                 printThreadMemory(response.threadMemory());
@@ -1007,6 +1015,10 @@ public class CodexConsoleRunner implements CommandLineRunner {
         System.out.printf("[compaction] response %s from %d turns%n",
                 shortCompactionId(compaction),
                 compaction.compactedTurnCount());
+        printCompactionCompatibilitySnapshot(threadMemory);
+    }
+
+    private void printCompactionCompatibilitySnapshot(ThreadMemory threadMemory) {
         if (threadMemory != null) {
             System.out.printf("[memory] compatibility snapshot %s at %s%n",
                     threadMemory.memoryId(),
@@ -1028,6 +1040,17 @@ public class CodexConsoleRunner implements CommandLineRunner {
         }
         if (item instanceof AgentMessageItem agentMessageItem) {
             System.out.println("[assistant] " + agentMessageItem.text());
+            return;
+        }
+        if (item instanceof MailboxMessageItem mailboxMessageItem) {
+            System.out.println("[mailbox] "
+                    + mailboxMessageItem.deliveryKind().name().toLowerCase(Locale.ROOT).replace('_', '-')
+                    + " "
+                    + safeThreadId(mailboxMessageItem.senderThreadId())
+                    + " -> "
+                    + safeThreadId(mailboxMessageItem.receiverThreadId())
+                    + " | "
+                    + compactText(blankToPlaceholder(mailboxMessageItem.text())));
             return;
         }
         if (item instanceof ReasoningItem reasoningItem) {
@@ -1123,10 +1146,11 @@ public class CodexConsoleRunner implements CommandLineRunner {
             if (approve) {
                 System.out.println("Approved command " + shortApprovalId(approval) + ".");
                 printApprovedCommandResult(approval.executionResult());
-                resumeApprovedTurn(approval);
+                resumeApprovalTurn(approval);
             }
             else {
                 System.out.println("Rejected command " + shortApprovalId(approval) + ".");
+                resumeApprovalTurn(approval);
             }
         }
         catch (IllegalArgumentException exception) {
@@ -1134,7 +1158,7 @@ public class CodexConsoleRunner implements CommandLineRunner {
         }
     }
 
-    private void resumeApprovedTurn(CommandApprovalRequest approval) {
+    private void resumeApprovalTurn(CommandApprovalRequest approval) {
         if (approval == null || approval.turnId() == null || activeThreadId == null) {
             return;
         }
@@ -1641,6 +1665,9 @@ public class CodexConsoleRunner implements CommandLineRunner {
     private void switchAfterArchivingActiveThread(ThreadId archivedThreadId) {
         List<ThreadSummary> candidates = fetchThreads(false).stream()
                 .filter(thread -> !thread.threadId().equals(archivedThreadId))
+                .sorted(Comparator
+                        .comparingInt(this::archiveReplacementPriority)
+                        .thenComparing(ThreadSummary::updatedAt, Comparator.nullsLast(Comparator.reverseOrder())))
                 .toList();
         if (candidates.isEmpty()) {
             activeThreadId = createThread("Thread " + threadSequence++);
@@ -1653,6 +1680,20 @@ public class CodexConsoleRunner implements CommandLineRunner {
         }
         activeThreadId = replacement.threadId();
         System.out.println("Switched to thread: " + shortThreadId(activeThreadId));
+    }
+
+    private int archiveReplacementPriority(ThreadSummary thread) {
+        if (thread == null) {
+            return Integer.MAX_VALUE;
+        }
+        int priority = 0;
+        if (thread.source() == ThreadSource.SUB_AGENT || thread.parentThreadId() != null) {
+            priority += 10;
+        }
+        if (!thread.loaded()) {
+            priority += 2;
+        }
+        return priority;
     }
 
     private String formatEnum(Enum<?> value) {
@@ -1949,8 +1990,31 @@ public class CodexConsoleRunner implements CommandLineRunner {
             }
             if (notification instanceof ThreadCompactionStartedNotification
                     || notification instanceof ThreadCompactedNotification) {
+                if (shouldSuppressCompactionNotification(notification)) {
+                    return;
+                }
                 printCompactionNotification(notification);
             }
+        }
+
+        private boolean shouldSuppressCompactionNotification(AppServerNotification notification) {
+            ThreadCompaction compaction = null;
+            boolean completed = false;
+            if (notification instanceof ThreadCompactionStartedNotification started) {
+                compaction = started.compaction();
+            }
+            else if (notification instanceof ThreadCompactedNotification finished) {
+                compaction = finished.compaction();
+                completed = true;
+            }
+            if (compaction == null || compaction.compactionId() == null) {
+                return false;
+            }
+            boolean suppressed = suppressedCompactionNotificationIds.contains(compaction.compactionId());
+            if (suppressed && completed) {
+                suppressedCompactionNotificationIds.remove(compaction.compactionId());
+            }
+            return suppressed;
         }
 
         private void printCommandExecutionOutputDelta(CommandExecutionOutputDeltaNotification notification) {
@@ -2076,6 +2140,7 @@ public class CodexConsoleRunner implements CommandLineRunner {
         private final AutoCloseable subscription;
         private final ThreadId threadId;
         private String targetCompactionId;
+        private boolean printedLifecycle;
 
         private CompactionNotificationSession(ThreadId threadId) {
             this.threadId = threadId;
@@ -2094,6 +2159,7 @@ public class CodexConsoleRunner implements CommandLineRunner {
                 return;
             }
             this.targetCompactionId = compaction.compactionId();
+            suppressedCompactionNotificationIds.add(this.targetCompactionId);
             for (AppServerNotification notification : pendingNotifications) {
                 if (matches(notification)) {
                     process(notification);
@@ -2143,9 +2209,14 @@ public class CodexConsoleRunner implements CommandLineRunner {
 
         private void process(AppServerNotification notification) {
             printCompactionNotification(notification);
+            printedLifecycle = true;
             if (notification instanceof ThreadCompactedNotification) {
                 completionLatch.countDown();
             }
+        }
+
+        private boolean printedLifecycle() {
+            return printedLifecycle;
         }
 
         @Override

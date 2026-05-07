@@ -51,21 +51,21 @@ public class DefaultTurnExecutor implements TurnExecutor {
     }
 
     @Override
-    public synchronized CodexTurnResult executeTurn(ThreadId threadId, String input) {
+    public CodexTurnResult executeTurn(ThreadId threadId, String input) {
         return executeTurn(threadId, input, null);
     }
 
     @Override
-    public synchronized CodexTurnResult executeTurn(ThreadId threadId, String input, Consumer<TurnItem> itemConsumer) {
+    public CodexTurnResult executeTurn(ThreadId threadId, String input, Consumer<TurnItem> itemConsumer) {
         return executeTurn(threadId, input, itemConsumer, new TurnControl() { });
     }
 
     @Override
-    public synchronized CodexTurnResult executeTurn(ThreadId threadId,
-                                                    String input,
-                                                    List<ModelInputItem> inputItems,
-                                                    Consumer<TurnItem> itemConsumer,
-                                                    TurnControl turnControl) {
+    public CodexTurnResult executeTurn(ThreadId threadId,
+                                       String input,
+                                       List<ModelInputItem> inputItems,
+                                       Consumer<TurnItem> itemConsumer,
+                                       TurnControl turnControl) {
         if (!conversationStore.exists(threadId)) {
             throw new IllegalArgumentException("Unknown thread id: " + (threadId == null ? "<null>" : threadId.value()));
         }
@@ -81,20 +81,20 @@ public class DefaultTurnExecutor implements TurnExecutor {
     }
 
     @Override
-    public synchronized CodexTurnResult executeTurn(ThreadId threadId,
-                                                    String input,
-                                                    Consumer<TurnItem> itemConsumer,
-                                                    TurnControl turnControl) {
+    public CodexTurnResult executeTurn(ThreadId threadId,
+                                       String input,
+                                       Consumer<TurnItem> itemConsumer,
+                                       TurnControl turnControl) {
         return executeTurn(threadId, input, List.of(), itemConsumer, turnControl);
     }
 
     @Override
-    public synchronized CodexTurnResult executeTurn(ThreadId threadId,
-                                                    TurnId turnId,
-                                                    String input,
-                                                    List<ModelInputItem> inputItems,
-                                                    Consumer<TurnItem> itemConsumer,
-                                                    TurnControl turnControl) {
+    public CodexTurnResult executeTurn(ThreadId threadId,
+                                       TurnId turnId,
+                                       String input,
+                                       List<ModelInputItem> inputItems,
+                                       Consumer<TurnItem> itemConsumer,
+                                       TurnControl turnControl) {
         if (!conversationStore.exists(threadId)) {
             throw new IllegalArgumentException("Unknown thread id: " + (threadId == null ? "<null>" : threadId.value()));
         }
@@ -109,29 +109,29 @@ public class DefaultTurnExecutor implements TurnExecutor {
     }
 
     @Override
-    public synchronized CodexTurnResult executeTurn(ThreadId threadId,
-                                                    TurnId turnId,
-                                                    String input,
-                                                    Consumer<TurnItem> itemConsumer,
-                                                    TurnControl turnControl) {
+    public CodexTurnResult executeTurn(ThreadId threadId,
+                                       TurnId turnId,
+                                       String input,
+                                       Consumer<TurnItem> itemConsumer,
+                                       TurnControl turnControl) {
         return executeTurn(threadId, turnId, input, List.of(), itemConsumer, turnControl);
     }
 
     @Override
-    public synchronized CodexTurnResult resumeTurn(ThreadId threadId, TurnId turnId) {
+    public CodexTurnResult resumeTurn(ThreadId threadId, TurnId turnId) {
         return resumeTurn(threadId, turnId, null);
     }
 
     @Override
-    public synchronized CodexTurnResult resumeTurn(ThreadId threadId, TurnId turnId, Consumer<TurnItem> itemConsumer) {
+    public CodexTurnResult resumeTurn(ThreadId threadId, TurnId turnId, Consumer<TurnItem> itemConsumer) {
         return resumeTurn(threadId, turnId, itemConsumer, new TurnControl() { });
     }
 
     @Override
-    public synchronized CodexTurnResult resumeTurn(ThreadId threadId,
-                                                   TurnId turnId,
-                                                   Consumer<TurnItem> itemConsumer,
-                                                   TurnControl turnControl) {
+    public CodexTurnResult resumeTurn(ThreadId threadId,
+                                      TurnId turnId,
+                                      Consumer<TurnItem> itemConsumer,
+                                      TurnControl turnControl) {
         if (!conversationStore.exists(threadId)) {
             throw new IllegalArgumentException("Unknown thread id: " + (threadId == null ? "<null>" : threadId.value()));
         }

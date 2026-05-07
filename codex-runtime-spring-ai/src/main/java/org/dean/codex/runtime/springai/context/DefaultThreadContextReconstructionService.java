@@ -16,6 +16,7 @@ import org.dean.codex.protocol.history.HistoryApprovalItem;
 import org.dean.codex.protocol.history.HistoryCompactionSummaryItem;
 import org.dean.codex.protocol.history.HistoryCollabToolCallItem;
 import org.dean.codex.protocol.history.HistoryImageItem;
+import org.dean.codex.protocol.history.HistoryMailboxMessageItem;
 import org.dean.codex.protocol.history.HistoryMessageItem;
 import org.dean.codex.protocol.history.HistoryPlanItem;
 import org.dean.codex.protocol.history.HistoryReasoningItem;
@@ -27,6 +28,7 @@ import org.dean.codex.protocol.history.ThreadHistoryItem;
 import org.dean.codex.protocol.item.AgentMessageItem;
 import org.dean.codex.protocol.item.ApprovalItem;
 import org.dean.codex.protocol.item.CollabToolCallItem;
+import org.dean.codex.protocol.item.MailboxMessageItem;
 import org.dean.codex.protocol.item.PlanItem;
 import org.dean.codex.protocol.item.ReasoningItem;
 import org.dean.codex.protocol.item.RuntimeErrorItem;
@@ -137,6 +139,13 @@ public class DefaultThreadContextReconstructionService implements ThreadContextR
                     historyMessageItem.text(),
                     historyMessageItem.createdAt()));
         }
+        if (item instanceof HistoryMailboxMessageItem mailboxMessageItem) {
+            return Optional.of(new ConversationMessage(
+                    turn.turnId(),
+                    MessageRole.ASSISTANT,
+                    formatMailboxPromptText(mailboxMessageItem.senderThreadId(), mailboxMessageItem.text()),
+                    mailboxMessageItem.createdAt()));
+        }
         return Optional.empty();
     }
 
@@ -166,7 +175,7 @@ public class DefaultThreadContextReconstructionService implements ThreadContextR
                 continue;
             }
             for (TurnItem item : turn.items()) {
-                replaySummaryForItem(item).ifPresent(replaySummary::add);
+                replaySummaryForItem(item, turn.turnId()).ifPresent(replaySummary::add);
             }
         }
         return List.copyOf(replaySummary);
@@ -178,7 +187,7 @@ public class DefaultThreadContextReconstructionService implements ThreadContextR
         }
         List<ReconstructedReplayItem> replaySummary = new ArrayList<>();
         for (ThreadHistoryItem item : historyItems) {
-            replaySummaryForItem(item).ifPresent(replaySummary::add);
+            replaySummaryForItem(item, item.turnId()).ifPresent(replaySummary::add);
         }
         return List.copyOf(replaySummary);
     }
@@ -198,7 +207,8 @@ public class DefaultThreadContextReconstructionService implements ThreadContextR
         return List.copyOf(merged);
     }
 
-    private Optional<ReconstructedReplayItem> replaySummaryForItem(Object item) {
+    private Optional<ReconstructedReplayItem> replaySummaryForItem(Object item,
+                                                                   org.dean.codex.protocol.conversation.TurnId turnId) {
         if (item instanceof HistoryCompactionSummaryItem summaryItem) {
             return Optional.of(new ReconstructedReplayItem(
                     summaryItem.anchorTurnId(),
@@ -221,13 +231,33 @@ public class DefaultThreadContextReconstructionService implements ThreadContextR
         }
         if (item instanceof CollabToolCallItem collabItem) {
             return Optional.of(new ReconstructedReplayItem(
-                    new org.dean.codex.protocol.conversation.TurnId(""),
+                    turnId,
                     "collaboration",
                     "collabToolCall: " + collabItem.tool() + " " + collabItem.status().jsonValue(),
                     collabItem.deliveryState(),
                     summarizeMailboxes(collabItem.mailboxes()),
                     collabItem.wakeupCause(),
                     collabItem.createdAt()));
+        }
+        if (item instanceof HistoryMailboxMessageItem mailboxMessageItem) {
+            return Optional.of(new ReconstructedReplayItem(
+                    mailboxMessageItem.turnId(),
+                    "mailbox",
+                    summarizeMailbox(mailboxMessageItem.senderThreadId(), mailboxMessageItem.deliveryKind(), mailboxMessageItem.text()),
+                    null,
+                    null,
+                    null,
+                    mailboxMessageItem.createdAt()));
+        }
+        if (item instanceof MailboxMessageItem mailboxMessageItem) {
+            return Optional.of(new ReconstructedReplayItem(
+                    turnId,
+                    "mailbox",
+                    summarizeMailbox(mailboxMessageItem.senderThreadId(), mailboxMessageItem.deliveryKind(), mailboxMessageItem.text()),
+                    null,
+                    null,
+                    null,
+                    mailboxMessageItem.createdAt()));
         }
         return Optional.empty();
     }
@@ -282,18 +312,29 @@ public class DefaultThreadContextReconstructionService implements ThreadContextR
     }
 
     private Stream<ConversationMessage> messagesForTurn(ConversationTurn turn) {
-        ConversationMessage userMessage = new ConversationMessage(turn.turnId(),
+        List<ConversationMessage> messages = new ArrayList<>();
+        messages.add(new ConversationMessage(
+                turn.turnId(),
                 MessageRole.USER,
                 turn.userInput(),
-                turn.startedAt());
-        if (turn.finalAnswer() == null || turn.finalAnswer().isBlank()) {
-            return Stream.of(userMessage);
+                turn.startedAt()));
+        turn.items().stream()
+                .filter(MailboxMessageItem.class::isInstance)
+                .map(MailboxMessageItem.class::cast)
+                .map(item -> new ConversationMessage(
+                        turn.turnId(),
+                        MessageRole.ASSISTANT,
+                        formatMailboxPromptText(item.senderThreadId(), item.text()),
+                        item.createdAt()))
+                .forEach(messages::add);
+        if (turn.finalAnswer() != null && !turn.finalAnswer().isBlank()) {
+            messages.add(new ConversationMessage(
+                    turn.turnId(),
+                    MessageRole.ASSISTANT,
+                    turn.finalAnswer(),
+                    turn.completedAt() == null ? turn.startedAt() : turn.completedAt()));
         }
-        ConversationMessage assistantMessage = new ConversationMessage(turn.turnId(),
-                MessageRole.ASSISTANT,
-                turn.finalAnswer(),
-                turn.completedAt() == null ? turn.startedAt() : turn.completedAt());
-        return Stream.of(userMessage, assistantMessage);
+        return messages.stream();
     }
 
     private Stream<ReconstructedTurnActivity> activitiesForTurn(ConversationTurn turn) {
@@ -322,6 +363,9 @@ public class DefaultThreadContextReconstructionService implements ThreadContextR
         }
         if (item instanceof AgentMessageItem agentMessageItem) {
             return agentMessageItem.createdAt();
+        }
+        if (item instanceof MailboxMessageItem mailboxMessageItem) {
+            return mailboxMessageItem.createdAt();
         }
         if (item instanceof PlanItem planItem) {
             return planItem.createdAt();
@@ -357,6 +401,9 @@ public class DefaultThreadContextReconstructionService implements ThreadContextR
         }
         if (item instanceof HistoryImageItem historyImageItem) {
             return "userImage: " + imageSummary(historyImageItem.imageUrl(), historyImageItem.detail());
+        }
+        if (item instanceof HistoryMailboxMessageItem mailboxMessageItem) {
+            return summarizeMailbox(mailboxMessageItem.senderThreadId(), mailboxMessageItem.deliveryKind(), mailboxMessageItem.text());
         }
         if (item instanceof HistoryPlanItem historyPlanItem) {
             if (historyPlanItem.plan() == null || historyPlanItem.plan().edits().isEmpty()) {
@@ -409,6 +456,9 @@ public class DefaultThreadContextReconstructionService implements ThreadContextR
         if (item instanceof AgentMessageItem agentMessageItem) {
             return "agentMessage: " + agentMessageItem.text();
         }
+        if (item instanceof MailboxMessageItem mailboxMessageItem) {
+            return summarizeMailbox(mailboxMessageItem.senderThreadId(), mailboxMessageItem.deliveryKind(), mailboxMessageItem.text());
+        }
         if (item instanceof PlanItem planItem) {
             if (planItem.plan() == null || planItem.plan().edits().isEmpty()) {
                 return "plan: " + blankToPlaceholder(planItem.plan() == null ? "" : planItem.plan().summary());
@@ -456,6 +506,23 @@ public class DefaultThreadContextReconstructionService implements ThreadContextR
             return url;
         }
         return url + " (detail=" + detail + ")";
+    }
+
+    private String formatMailboxPromptText(ThreadId senderThreadId, String text) {
+        String sender = senderThreadId == null || senderThreadId.value() == null || senderThreadId.value().isBlank()
+                ? "(unknown-sender)"
+                : senderThreadId.value();
+        return "MAILBOX " + sender + ": " + blankToPlaceholder(text);
+    }
+
+    private String summarizeMailbox(ThreadId senderThreadId,
+                                    org.dean.codex.protocol.item.MailboxDeliveryKind deliveryKind,
+                                    String text) {
+        String sender = senderThreadId == null || senderThreadId.value() == null || senderThreadId.value().isBlank()
+                ? "(unknown-sender)"
+                : senderThreadId.value();
+        String kind = deliveryKind == null ? "queueOnly" : deliveryKind.name().toLowerCase(java.util.Locale.ROOT);
+        return "mailbox: " + kind + " from " + sender + " | " + blankToPlaceholder(text);
     }
 
     private String summarizeEvent(org.dean.codex.protocol.event.TurnEvent event) {

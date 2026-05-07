@@ -2,6 +2,7 @@ package org.dean.codex.runtime.springai.runtime;
 
 import jakarta.annotation.PreDestroy;
 import org.dean.codex.core.agent.AgentControl;
+import org.dean.codex.core.agent.MailboxTurnMessage;
 import org.dean.codex.core.agent.TurnControl;
 import org.dean.codex.core.agent.TurnExecutor;
 import org.dean.codex.core.model.ModelInputItem;
@@ -25,12 +26,14 @@ import org.dean.codex.protocol.conversation.ThreadActiveFlag;
 import org.dean.codex.protocol.conversation.ThreadId;
 import org.dean.codex.protocol.conversation.ThreadModelSessionSummary;
 import org.dean.codex.protocol.conversation.ThreadPromptStateSummary;
+import org.dean.codex.protocol.conversation.ThreadSource;
 import org.dean.codex.protocol.conversation.ThreadStatus;
 import org.dean.codex.protocol.conversation.ThreadSummary;
 import org.dean.codex.protocol.conversation.TurnId;
 import org.dean.codex.protocol.conversation.TurnStatus;
 import org.dean.codex.protocol.event.CodexTurnResult;
 import org.dean.codex.protocol.item.TurnItem;
+import org.dean.codex.protocol.item.MailboxDeliveryKind;
 import org.dean.codex.protocol.runtime.RuntimeNotification;
 import org.dean.codex.protocol.runtime.RuntimeNotificationType;
 import org.dean.codex.protocol.runtime.RuntimeTurn;
@@ -86,6 +89,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
     private final Map<TurnId, RunningTurn> runningTurns = new ConcurrentHashMap<>();
     private final Set<ThreadId> loadedThreadIds = ConcurrentHashMap.newKeySet();
     private final Map<ThreadId, ConcurrentLinkedQueue<AgentMessage>> pendingAgentInputs = new ConcurrentHashMap<>();
+    private final Map<ThreadId, ConcurrentLinkedQueue<MailboxTurnMessage>> pendingMailboxMessages = new ConcurrentHashMap<>();
     private final Map<ThreadId, AtomicLong> mailboxSequences = new ConcurrentHashMap<>();
     private final Map<ThreadId, Instant> mailboxUpdatedAt = new ConcurrentHashMap<>();
     private final ThreadCatalogSnapshotCache threadCatalogSnapshotCache = new ThreadCatalogSnapshotCache();
@@ -219,7 +223,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
     @Override
     public ThreadSummary threadStart(String title) {
         ThreadId threadId = conversationStore.createThread(title);
-        conversationStore.updateThreadMetadata(threadId, null, null, null, null, null, null, null, null, null);
+        conversationStore.updateThreadMetadata(threadId, null, null, null, null, null, null, null, null, null, null);
         persistPromptSnapshot(threadId);
         persistModelSessionSnapshot(threadId);
         markThreadLoaded(threadId);
@@ -402,6 +406,15 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
             AgentTurnSnapshot snapshot = latestAgentTurnSnapshot(target);
             previousSnapshots.put(target, snapshot);
             previousMailboxes.put(target, mailboxState(target));
+            if (!isAgentWorking(summary.status()) && snapshot != null && hasDeliverableAgentTurnStatus(snapshot.status())) {
+                return completedAgentWaitResult(
+                        target,
+                        previousStatuses.get(target),
+                        summary.status(),
+                        snapshot,
+                        previousMailboxes.get(target),
+                        "Agent already has a completed turn result.");
+            }
         }
 
         long deadline = System.nanoTime() + (timeoutMillis * 1_000_000L);
@@ -413,6 +426,19 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
                 boolean mailboxChanged = !sameMailboxState(mailbox, previousMailboxes.get(target));
                 boolean producedTurn = !sameSnapshot(snapshot, previousSnapshots.get(target));
                 if (mailboxChanged || summary.closed() || producedTurn) {
+                    if (snapshot != null && hasDeliverableAgentTurnStatus(snapshot.status())) {
+                        return completedAgentWaitResult(
+                                target,
+                                previousStatuses.get(target),
+                                summary.status(),
+                                snapshot,
+                                mailbox,
+                                producedTurn
+                                        ? "Agent produced a new turn result."
+                                        : mailboxChanged
+                                        ? "Agent mailbox updated."
+                                        : "Agent status changed.");
+                    }
                     return new AgentWaitResult(
                             target,
                             snapshot == null ? null : snapshot.turnId(),
@@ -454,11 +480,30 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
                 Instant.now());
     }
 
+    private AgentWaitResult completedAgentWaitResult(ThreadId threadId,
+                                                     AgentStatus previousStatus,
+                                                     AgentStatus currentStatus,
+                                                     AgentTurnSnapshot snapshot,
+                                                     AgentMailboxState mailbox,
+                                                     String message) {
+        String finalAnswer = snapshot == null || snapshot.finalAnswer() == null ? "" : snapshot.finalAnswer();
+        return new AgentWaitResult(
+                threadId,
+                snapshot == null ? null : snapshot.turnId(),
+                previousStatus,
+                currentStatus,
+                false,
+                message,
+                finalAnswer,
+                mailbox,
+                Instant.now());
+    }
+
     @Override
     public AgentMailboxState mailboxState(ThreadId agentThreadId) {
         requireThread(agentThreadId);
         long sequence = mailboxSequences.getOrDefault(agentThreadId, new AtomicLong(0L)).get();
-        int pendingMessages = pendingAgentInputs.getOrDefault(agentThreadId, new ConcurrentLinkedQueue<>()).size();
+        int pendingMessages = pendingMailboxCount(agentThreadId);
         Instant updatedAt = mailboxUpdatedAt.get(agentThreadId);
         return new AgentMailboxState(agentThreadId, sequence, pendingMessages, updatedAt);
     }
@@ -502,6 +547,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
                     summary.agentPath());
             loadedThreadIds.remove(threadId);
             pendingAgentInputs.remove(threadId);
+            pendingMailboxMessages.remove(threadId);
             mailboxSequences.remove(threadId);
             mailboxUpdatedAt.remove(threadId);
             invalidateThreadCatalog(threadId);
@@ -589,7 +635,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
 
     @Override
     public ThreadSummary updateThreadMetadata(ThreadId threadId, String cwd, String modelProvider, String model) {
-        return updateThreadMetadata(threadId, cwd, modelProvider, model, null, null, null, null, null, null);
+        return updateThreadMetadata(threadId, cwd, modelProvider, model, null, null, null, null, null, null, null);
     }
 
     @Override
@@ -599,7 +645,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
                                               String model,
                                               String sandboxMode,
                                               String approvalMode) {
-        return updateThreadMetadata(threadId, cwd, modelProvider, model, sandboxMode, approvalMode, null, null, null, null);
+        return updateThreadMetadata(threadId, cwd, modelProvider, model, sandboxMode, approvalMode, null, null, null, null, null);
     }
 
     @Override
@@ -613,6 +659,21 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
                                               String gitBranch,
                                               String gitOriginUrl,
                                               String cliVersion) {
+        return updateThreadMetadata(threadId, cwd, modelProvider, model, sandboxMode, approvalMode, gitSha, gitBranch, gitOriginUrl, cliVersion, null);
+    }
+
+    @Override
+    public ThreadSummary updateThreadMetadata(ThreadId threadId,
+                                              String cwd,
+                                              String modelProvider,
+                                              String model,
+                                              String sandboxMode,
+                                              String approvalMode,
+                                              String gitSha,
+                                              String gitBranch,
+                                              String gitOriginUrl,
+                                              String cliVersion,
+                                              ThreadSource source) {
         requireThread(threadId);
         ThreadSummary updated = conversationStore.updateThreadMetadata(
                 threadId,
@@ -624,7 +685,8 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
                 gitSha,
                 gitBranch,
                 gitOriginUrl,
-                cliVersion);
+                cliVersion,
+                source);
         invalidateThreadCatalog(threadId);
         return runtimeThreadSummary(updated);
     }
@@ -689,7 +751,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
         Instant startedAt = Instant.now();
         TurnId turnId = conversationStore.startTurn(threadId, input, startedAt);
         invalidateThreadCatalog(threadId);
-        RunningTurn runningTurn = new RunningTurn(threadId, turnId, startedAt);
+        RunningTurn runningTurn = new RunningTurn(threadId, turnId, startedAt, drainPendingMailboxMessages(threadId));
         runningTurns.put(turnId, runningTurn);
 
         RuntimeTurn runtimeTurn = new RuntimeTurn(threadId, turnId, TurnStatus.RUNNING, startedAt, null);
@@ -704,7 +766,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
         requireThread(threadId);
         requireLoadedThread(threadId);
         ConversationTurn turn = conversationStore.turn(threadId, turnId);
-        RunningTurn runningTurn = new RunningTurn(threadId, turnId, turn.startedAt());
+        RunningTurn runningTurn = new RunningTurn(threadId, turnId, turn.startedAt(), drainPendingMailboxMessages(threadId));
         runningTurns.put(turnId, runningTurn);
 
         RuntimeTurn runtimeTurn = new RuntimeTurn(threadId, turnId, TurnStatus.RUNNING, turn.startedAt(), null);
@@ -772,6 +834,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
         }
         finally {
             runningTurns.remove(runningTurn.turnId());
+            requeueMailboxMessages(runningTurn);
             startNextAgentTurnIfIdle(runningTurn.threadId());
         }
     }
@@ -790,6 +853,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
         }
         finally {
             runningTurns.remove(runningTurn.turnId());
+            requeueMailboxMessages(runningTurn);
             startNextAgentTurnIfIdle(runningTurn.threadId());
         }
     }
@@ -797,6 +861,7 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
     private void publishCompletion(RunningTurn runningTurn, CodexTurnResult result) {
         ConversationTurn storedTurn = conversationStore.turn(runningTurn.threadId(), runningTurn.turnId());
         invalidateThreadCatalog(runningTurn.threadId());
+        publishChildCompletionToParent(runningTurn.threadId(), storedTurn.status(), storedTurn.finalAnswer(), storedTurn.completedAt());
         RuntimeTurn runtimeTurn = new RuntimeTurn(
                 runningTurn.threadId(),
                 runningTurn.turnId(),
@@ -817,6 +882,13 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
     private void publishFailure(RunningTurn runningTurn, Exception exception) {
         ConversationTurn storedTurn = conversationStore.turn(runningTurn.threadId(), runningTurn.turnId());
         invalidateThreadCatalog(runningTurn.threadId());
+        publishChildCompletionToParent(
+                runningTurn.threadId(),
+                storedTurn.status(),
+                storedTurn.finalAnswer() == null || storedTurn.finalAnswer().isBlank()
+                        ? "The runtime failed: " + (exception.getMessage() == null ? "Unknown error" : exception.getMessage())
+                        : storedTurn.finalAnswer(),
+                storedTurn.completedAt());
         RuntimeTurn runtimeTurn = new RuntimeTurn(
                 runningTurn.threadId(),
                 runningTurn.turnId(),
@@ -863,6 +935,19 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
                                              TurnStatus status,
                                              String finalAnswer) {
         return new RuntimeNotification(type, threadId, turnId, thread, turn, item, status, finalAnswer, Instant.now());
+    }
+
+    private RuntimeNotification mailboxNotification(ThreadId threadId) {
+        return new RuntimeNotification(
+                RuntimeNotificationType.AGENT_MAILBOX_UPDATED,
+                threadId,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                Instant.now());
     }
 
     private void publish(RuntimeNotification notification) {
@@ -1191,13 +1276,66 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
             return;
         }
         pendingAgentInputs.computeIfAbsent(threadId, ignored -> new ConcurrentLinkedQueue<>()).add(message);
-        mailboxSequences.computeIfAbsent(threadId, ignored -> new AtomicLong(0L)).incrementAndGet();
-        mailboxUpdatedAt.put(threadId, message.createdAt() == null ? Instant.now() : message.createdAt());
+        touchMailbox(threadId, message.createdAt());
     }
 
     private boolean hasPendingAgentInput(ThreadId threadId) {
         Queue<AgentMessage> mailbox = pendingAgentInputs.get(threadId);
         return mailbox != null && !mailbox.isEmpty();
+    }
+
+    private void enqueueMailboxMessage(ThreadId receiverThreadId, MailboxTurnMessage message) {
+        if (receiverThreadId == null || message == null || message.text() == null || message.text().isBlank()) {
+            return;
+        }
+        RunningTurn runningTurn = runningTurnForThread(receiverThreadId);
+        if (runningTurn != null) {
+            runningTurn.addMailboxMessage(message);
+        }
+        else {
+            pendingMailboxMessages.computeIfAbsent(receiverThreadId, ignored -> new ConcurrentLinkedQueue<>()).add(message);
+        }
+        touchMailbox(receiverThreadId, message.createdAt());
+        publish(mailboxNotification(receiverThreadId));
+    }
+
+    private void touchMailbox(ThreadId threadId, Instant updatedAt) {
+        mailboxSequences.computeIfAbsent(threadId, ignored -> new AtomicLong(0L)).incrementAndGet();
+        mailboxUpdatedAt.put(threadId, updatedAt == null ? Instant.now() : updatedAt);
+    }
+
+    private List<MailboxTurnMessage> drainPendingMailboxMessages(ThreadId threadId) {
+        Queue<MailboxTurnMessage> mailbox = pendingMailboxMessages.get(threadId);
+        if (mailbox == null || mailbox.isEmpty()) {
+            return List.of();
+        }
+        List<MailboxTurnMessage> drained = new ArrayList<>();
+        MailboxTurnMessage message;
+        while ((message = mailbox.poll()) != null) {
+            drained.add(message);
+        }
+        return List.copyOf(drained);
+    }
+
+    private void requeueMailboxMessages(RunningTurn runningTurn) {
+        if (runningTurn == null) {
+            return;
+        }
+        List<MailboxTurnMessage> remaining = runningTurn.drainMailboxMessages();
+        if (remaining.isEmpty()) {
+            return;
+        }
+        pendingMailboxMessages
+                .computeIfAbsent(runningTurn.threadId(), ignored -> new ConcurrentLinkedQueue<>())
+                .addAll(remaining);
+    }
+
+    private int pendingMailboxCount(ThreadId threadId) {
+        int childInputCount = pendingAgentInputs.getOrDefault(threadId, new ConcurrentLinkedQueue<>()).size();
+        int queuedMailboxCount = pendingMailboxMessages.getOrDefault(threadId, new ConcurrentLinkedQueue<>()).size();
+        RunningTurn runningTurn = runningTurnForThread(threadId);
+        int activeMailboxCount = runningTurn == null ? 0 : runningTurn.pendingMailboxCount();
+        return childInputCount + queuedMailboxCount + activeMailboxCount;
     }
 
     private boolean sameMailboxState(AgentMailboxState left, AgentMailboxState right) {
@@ -1250,6 +1388,69 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
             return;
         }
         turnStart(threadId, input);
+    }
+
+    private RunningTurn runningTurnForThread(ThreadId threadId) {
+        if (threadId == null) {
+            return null;
+        }
+        return runningTurns.values().stream()
+                .filter(turn -> threadId.equals(turn.threadId()))
+                .findFirst()
+                .orElse(null);
+    }
+
+    private void publishChildCompletionToParent(ThreadId childThreadId,
+                                                TurnStatus turnStatus,
+                                                String finalAnswer,
+                                                Instant completedAt) {
+        if (childThreadId == null) {
+            return;
+        }
+        if (!hasDeliverableAgentTurnStatus(turnStatus)) {
+            return;
+        }
+        ThreadSummary childSummary = storedThreadSummary(childThreadId);
+        if (childSummary.parentThreadId() == null) {
+            return;
+        }
+        String completionText = describeChildCompletion(childSummary, finalAnswer);
+        if (completionText.isBlank()) {
+            return;
+        }
+        enqueueMailboxMessage(
+                childSummary.parentThreadId(),
+                new MailboxTurnMessage(
+                        childThreadId,
+                        childSummary.parentThreadId(),
+                        MailboxDeliveryKind.CHILD_COMPLETION,
+                        completionText,
+                        completedAt == null ? Instant.now() : completedAt));
+    }
+
+    private String describeChildCompletion(ThreadSummary childSummary, String finalAnswer) {
+        String label = childSummary.agentNickname();
+        if (label == null || label.isBlank()) {
+            label = childSummary.agentPath();
+        }
+        if (label == null || label.isBlank()) {
+            label = childSummary.threadId().value();
+        }
+        String answer = finalAnswer == null ? "" : finalAnswer.trim();
+        if (answer.isBlank()) {
+            return "Sub-agent " + label + " completed without a final answer.";
+        }
+        return "Sub-agent " + label + " completed. Final answer:\n" + answer;
+    }
+
+    private boolean hasDeliverableAgentTurnStatus(TurnStatus turnStatus) {
+        return turnStatus == TurnStatus.COMPLETED || turnStatus == TurnStatus.FAILED;
+    }
+
+    private boolean isAgentWorking(AgentStatus status) {
+        return status == AgentStatus.RUNNING
+                || status == AgentStatus.WAITING
+                || status == AgentStatus.PENDING_INIT;
     }
 
     private AgentTurnSnapshot latestAgentTurnSnapshot(ThreadId threadId) {
@@ -1313,11 +1514,18 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
         private final Instant startedAt;
         private final AtomicBoolean interruptionRequested = new AtomicBoolean(false);
         private final Queue<String> steeringInputs = new ConcurrentLinkedQueue<>();
+        private final Queue<MailboxTurnMessage> mailboxMessages = new ConcurrentLinkedQueue<>();
 
-        private RunningTurn(ThreadId threadId, TurnId turnId, Instant startedAt) {
+        private RunningTurn(ThreadId threadId,
+                            TurnId turnId,
+                            Instant startedAt,
+                            List<MailboxTurnMessage> initialMailboxMessages) {
             this.threadId = threadId;
             this.turnId = turnId;
             this.startedAt = startedAt;
+            if (initialMailboxMessages != null && !initialMailboxMessages.isEmpty()) {
+                mailboxMessages.addAll(initialMailboxMessages);
+            }
         }
 
         private ThreadId threadId() {
@@ -1340,6 +1548,14 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
             steeringInputs.add(input);
         }
 
+        private void addMailboxMessage(MailboxTurnMessage message) {
+            mailboxMessages.add(message);
+        }
+
+        private int pendingMailboxCount() {
+            return mailboxMessages.size();
+        }
+
         @Override
         public boolean interruptionRequested() {
             return interruptionRequested.get();
@@ -1351,6 +1567,16 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
             String input;
             while ((input = steeringInputs.poll()) != null) {
                 drained.add(input);
+            }
+            return List.copyOf(drained);
+        }
+
+        @Override
+        public List<MailboxTurnMessage> drainMailboxMessages() {
+            List<MailboxTurnMessage> drained = new java.util.ArrayList<>();
+            MailboxTurnMessage message;
+            while ((message = mailboxMessages.poll()) != null) {
+                drained.add(message);
             }
             return List.copyOf(drained);
         }

@@ -15,12 +15,15 @@ import org.dean.codex.protocol.history.CompactionStrategy;
 import org.dean.codex.protocol.history.HistoryCompactionSummaryItem;
 import org.dean.codex.protocol.history.HistoryCollabToolCallItem;
 import org.dean.codex.protocol.history.HistoryMessageItem;
+import org.dean.codex.protocol.history.HistoryMailboxMessageItem;
 import org.dean.codex.protocol.history.HistoryToolCallItem;
 import org.dean.codex.protocol.history.ThreadHistoryItem;
 import org.dean.codex.protocol.item.CollabDeliveryState;
 import org.dean.codex.protocol.item.CollabToolCallItem;
 import org.dean.codex.protocol.item.CollabToolCallStatus;
 import org.dean.codex.protocol.item.AgentMessageItem;
+import org.dean.codex.protocol.item.MailboxDeliveryKind;
+import org.dean.codex.protocol.item.MailboxMessageItem;
 import org.dean.codex.protocol.agent.AgentMailboxState;
 import org.dean.codex.protocol.item.ToolCallItem;
 import org.dean.codex.protocol.item.UserMessageItem;
@@ -71,9 +74,16 @@ class DefaultThreadContextReconstructionServiceTest {
                 java.util.Map.of("thread-agent", new AgentMailboxState(new ThreadId("thread-agent"), 2L, 0, base.plusSeconds(7))),
                 "mailbox_updated",
                 base.plusSeconds(7));
+        MailboxMessageItem secondMailbox = new MailboxMessageItem(
+                new ItemId("item-5c"),
+                new ThreadId("thread-agent"),
+                threadId,
+                MailboxDeliveryKind.CHILD_COMPLETION,
+                "Sub-agent worker-1 completed. Final answer:\nREADME reviewed",
+                base.plusSeconds(7));
         AgentMessageItem secondAssistant = new AgentMessageItem(new ItemId("item-6"), "Updated docs", base.plusSeconds(8));
-        store.appendTurnItems(threadId, secondTurn, List.of(secondUser, secondToolCall, secondCollab, secondAssistant));
-        historyStore.append(threadId, ThreadHistoryMapper.map(List.of(secondUser, secondToolCall, secondCollab, secondAssistant)));
+        store.appendTurnItems(threadId, secondTurn, List.of(secondUser, secondToolCall, secondCollab, secondMailbox, secondAssistant));
+        historyStore.append(threadId, ThreadHistoryMapper.map(List.of(secondUser, secondToolCall, secondCollab, secondMailbox, secondAssistant)));
         store.completeTurn(threadId, secondTurn, TurnStatus.COMPLETED, "Updated docs", base.plusSeconds(9));
 
         TurnId thirdTurn = store.startTurn(threadId, "Run tests", base.plusSeconds(10));
@@ -87,6 +97,12 @@ class DefaultThreadContextReconstructionServiceTest {
                 new HistoryCompactionSummaryItem(secondTurn, "Compacted summary: keep the README change", base.plusSeconds(14)),
                 new HistoryMessageItem(MessageRole.USER, "Update docs", base.plusSeconds(6)),
                 new HistoryToolCallItem("READ_FILE", "README.md", base.plusSeconds(7)),
+                new HistoryMailboxMessageItem(
+                        new ThreadId("thread-agent"),
+                        threadId,
+                        MailboxDeliveryKind.CHILD_COMPLETION,
+                        "Sub-agent worker-1 completed. Final answer:\nREADME reviewed",
+                        base.plusSeconds(7)),
                 new HistoryMessageItem(MessageRole.ASSISTANT, "Updated docs", base.plusSeconds(8)),
                 new HistoryMessageItem(MessageRole.USER, "Run tests", base.plusSeconds(11)),
                 new HistoryMessageItem(MessageRole.ASSISTANT, "Ran tests", base.plusSeconds(12)));
@@ -113,7 +129,7 @@ class DefaultThreadContextReconstructionServiceTest {
 
         assertEquals("memory-1", reconstructed.threadMemory().memoryId());
         assertEquals(List.of(secondTurn, thirdTurn), reconstructed.recentTurns().stream().map(ConversationTurn::turnId).toList());
-        assertEquals(List.of("Compacted summary: keep the README change", "Update docs", "Updated docs", "Run tests", "Ran tests"),
+        assertEquals(List.of("Compacted summary: keep the README change", "Update docs", "MAILBOX thread-agent: Sub-agent worker-1 completed. Final answer:\nREADME reviewed", "Updated docs", "Run tests", "Ran tests"),
                 reconstructed.recentMessages().stream().map(message -> message.content()).toList());
         assertTrue(reconstructed.recentMessages().stream().noneMatch(message -> message.content().contains("Inspect repo")));
         assertTrue(reconstructed.recentActivities().stream()
@@ -126,6 +142,20 @@ class DefaultThreadContextReconstructionServiceTest {
                         && item.deliveryState() == CollabDeliveryState.DISPATCHED
                         && item.mailboxSummary() != null
                         && item.wakeupCause().equals("mailbox_updated")));
+        assertTrue(reconstructed.replaySummary().stream()
+                .anyMatch(item -> item.kind().equals("mailbox")
+                        && item.detail().contains("child_completion")
+                        && item.detail().contains("README reviewed")));
+        assertTrue(reconstructed.replaySummary().stream()
+                .anyMatch(item -> item.kind().equals("collaboration")
+                        && item.turnId() != null
+                        && item.turnId().equals(secondTurn)
+                        && item.detail().contains("spawn_agent")));
+        assertTrue(reconstructed.replaySummary().stream()
+                .anyMatch(item -> item.kind().equals("mailbox")
+                        && item.turnId() != null
+                        && item.turnId().equals(secondTurn)
+                        && item.detail().contains("README reviewed")));
     }
 
     private static final class FixedContextManager implements ContextManager {

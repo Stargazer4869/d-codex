@@ -7,6 +7,8 @@ import org.dean.codex.protocol.agent.AgentMailboxState;
 import org.dean.codex.protocol.item.CollabDeliveryState;
 import org.dean.codex.protocol.item.CollabToolCallItem;
 import org.dean.codex.protocol.item.CollabToolCallStatus;
+import org.dean.codex.protocol.item.MailboxDeliveryKind;
+import org.dean.codex.protocol.item.MailboxMessageItem;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -77,7 +79,16 @@ class AgentProtocolJsonTest {
                 Map.of("thread-agent", new AgentMailboxState(new ThreadId("thread-agent"), 3L, 1, Instant.parse("2026-04-01T00:04:15Z"))),
                 "mailbox_updated",
                 Instant.parse("2026-04-01T00:04:30Z"));
+        MailboxMessageItem mailboxMessage = new MailboxMessageItem(
+                new org.dean.codex.protocol.conversation.ItemId("item-mailbox"),
+                new ThreadId("thread-agent"),
+                new ThreadId("thread-parent"),
+                MailboxDeliveryKind.CHILD_COMPLETION,
+                "Sub-agent worker-1 completed. Final answer:\nReview complete",
+                Instant.parse("2026-04-01T00:04:45Z"));
         assertEquals(collab, objectMapper.readValue(objectMapper.writeValueAsString(collab), CollabToolCallItem.class));
+        assertEquals(mailboxMessage, objectMapper.readValue(objectMapper.writeValueAsString(mailboxMessage), MailboxMessageItem.class));
+        assertEquals(MailboxDeliveryKind.CHILD_COMPLETION, objectMapper.readValue("\"CHILD_COMPLETION\"", MailboxDeliveryKind.class));
         assertTrue(summary.closed());
         assertFalse(waitResult.timedOut());
     }

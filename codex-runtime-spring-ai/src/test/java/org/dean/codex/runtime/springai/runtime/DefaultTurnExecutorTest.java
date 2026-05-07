@@ -45,6 +45,9 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
@@ -192,6 +195,29 @@ class DefaultTurnExecutorTest {
         List<ThreadHistoryItem> history = historyStore.read(threadId);
         assertEquals(2, history.size());
         assertTrue(history.stream().allMatch(HistoryMessageItem.class::isInstance));
+    }
+
+    @Test
+    void executeTurnAllowsConcurrentTurnsThroughTheSameExecutor() throws Exception {
+        ConversationStore conversationStore = new InMemoryConversationStore();
+        InMemoryThreadHistoryStore historyStore = new InMemoryThreadHistoryStore();
+        ThreadId firstThreadId = conversationStore.createThread("First thread");
+        ThreadId secondThreadId = conversationStore.createThread("Second thread");
+        BlockingCodexAgent codexAgent = new BlockingCodexAgent();
+        DefaultTurnExecutor executor = new DefaultTurnExecutor(codexAgent, conversationStore, historyStore);
+
+        CompletableFuture<CodexTurnResult> firstTurn = CompletableFuture.supplyAsync(() ->
+                executor.executeTurn(firstThreadId, "first request"));
+        assertTrue(codexAgent.firstTurnStarted.await(2, TimeUnit.SECONDS));
+
+        CompletableFuture<CodexTurnResult> secondTurn = CompletableFuture.supplyAsync(() ->
+                executor.executeTurn(secondThreadId, "second request"));
+        assertTrue(codexAgent.secondTurnStarted.await(2, TimeUnit.SECONDS));
+
+        codexAgent.releaseFirstTurn.countDown();
+
+        assertEquals(TurnStatus.COMPLETED, firstTurn.join().status());
+        assertEquals(TurnStatus.COMPLETED, secondTurn.join().status());
     }
 
     private static final class RecordingCodexAgent implements CodexAgent {
@@ -367,6 +393,50 @@ class DefaultTurnExecutorTest {
         @Override
         public CodexTurnResult handleTurn(ThreadId threadId, TurnId turnId, String input) {
             throw new UnsupportedOperationException();
+        }
+    }
+
+    private static final class BlockingCodexAgent implements CodexAgent {
+
+        private final CountDownLatch firstTurnStarted = new CountDownLatch(1);
+        private final CountDownLatch secondTurnStarted = new CountDownLatch(1);
+        private final CountDownLatch releaseFirstTurn = new CountDownLatch(1);
+        private final AtomicInteger invocationCount = new AtomicInteger();
+
+        @Override
+        public CodexTurnResult handleTurn(ThreadId threadId,
+                                          TurnId turnId,
+                                          String input,
+                                          Consumer<TurnItem> eventConsumer) {
+            int invocation = invocationCount.incrementAndGet();
+            if (invocation == 1) {
+                firstTurnStarted.countDown();
+                awaitLatch(releaseFirstTurn);
+            }
+            else if (invocation == 2) {
+                secondTurnStarted.countDown();
+            }
+            AgentMessageItem messageItem = new AgentMessageItem(
+                    new ItemId("blocking-agent-" + invocation),
+                    "completed " + invocation,
+                    Instant.now());
+            eventConsumer.accept(messageItem);
+            return new CodexTurnResult(threadId, turnId, TurnStatus.COMPLETED, List.of(messageItem), "completed " + invocation);
+        }
+
+        @Override
+        public CodexTurnResult handleTurn(ThreadId threadId, TurnId turnId, String input) {
+            throw new UnsupportedOperationException();
+        }
+
+        private void awaitLatch(CountDownLatch latch) {
+            try {
+                assertTrue(latch.await(2, TimeUnit.SECONDS));
+            }
+            catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError(exception);
+            }
         }
     }
 }

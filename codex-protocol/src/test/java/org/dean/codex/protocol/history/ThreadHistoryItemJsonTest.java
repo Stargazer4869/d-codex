@@ -9,6 +9,7 @@ import org.dean.codex.protocol.conversation.ThreadId;
 import org.dean.codex.protocol.item.ApprovalState;
 import org.dean.codex.protocol.item.CollabDeliveryState;
 import org.dean.codex.protocol.item.CollabToolCallStatus;
+import org.dean.codex.protocol.item.MailboxDeliveryKind;
 import org.dean.codex.protocol.planning.EditPlan;
 import org.dean.codex.protocol.planning.PlannedEdit;
 import org.dean.codex.protocol.planning.PlannedEditType;
@@ -47,6 +48,13 @@ class ThreadHistoryItemJsonTest {
                         java.util.Map.of("thread-agent", org.dean.codex.protocol.agent.AgentStatus.IDLE),
                         java.util.Map.of("thread-agent", new AgentMailboxState(new ThreadId("thread-agent"), 1L, 0, now.plusSeconds(4))),
                         "mailbox_event",
+                        now.plusSeconds(4)),
+                new HistoryMailboxMessageItem(
+                        new TurnId("turn-1"),
+                        new ThreadId("thread-agent"),
+                        new ThreadId("thread-parent"),
+                        MailboxDeliveryKind.CHILD_COMPLETION,
+                        "Sub-agent worker-1 completed. Final answer:\nReview complete",
                         now.plusSeconds(4)),
                 new HistoryPlanItem(
                         new TurnId("turn-2"),
@@ -95,14 +103,15 @@ class ThreadHistoryItemJsonTest {
         assertEquals(history, restored);
 
         assertTrue(restored.stream().anyMatch(HistoryCollabToolCallItem.class::isInstance));
-        assertInstanceOf(HistoryReasoningItem.class, restored.get(8));
-        CompactedHistoryItem compacted = assertInstanceOf(CompactedHistoryItem.class, restored.get(9));
+        assertInstanceOf(HistoryReasoningItem.class, restored.get(9));
+        CompactedHistoryItem compacted = assertInstanceOf(CompactedHistoryItem.class, restored.get(10));
         assertEquals("Compacted earlier thread context.", compacted.summaryText());
         assertEquals(CompactionStrategy.LOCAL_SUMMARY, compacted.strategy());
         assertEquals(2, compacted.replacementHistory().size());
         HistoryCompactionSummaryItem summary = assertInstanceOf(HistoryCompactionSummaryItem.class, compacted.replacementHistory().get(0));
         assertEquals(new TurnId("turn-1"), summary.anchorTurnId());
         assertInstanceOf(HistoryToolResultItem.class, compacted.replacementHistory().get(1));
+        assertTrue(restored.stream().anyMatch(HistoryMailboxMessageItem.class::isInstance));
     }
 
     @Test

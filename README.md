@@ -20,9 +20,11 @@ This repository is now a phase-1 multi-module Maven foundation for rebuilding Co
 
 - Shared LLM/runtime defaults live in [`codex-runtime-defaults.yml`](codex-runtime-spring-ai/src/main/resources/codex-runtime-defaults.yml)
 - Spring AI prompt/completion logging is off by default there and can be enabled with `CODEX_CHAT_LOG_PROMPT=true` / `CODEX_CHAT_LOG_COMPLETION=true`
+- Set `CODEX_MODEL_TRANSPORT_MODE=responses-http` to run the planner and compaction summary path against the native OpenAI `/responses` HTTP backend; the default remains `chat-fallback` during rollout
+- Native Responses mode currently preserves the existing prompt-driven planner contract. It does not yet enable response-chain reuse or native tool-calling by default, because the planner still reconstructs full prompt context on each step.
 - The CLI owns its runnable config in [`application.yml`](codex-cli/src/main/resources/application.yml)
 - Runnable modules import shared defaults explicitly through `spring.config.import`
-- Conversation threads are persisted under `codex.storage-root`, which defaults to `${user.home}/.codex-java`
+- Conversation threads are persisted under `codex.storage-root`, which defaults to `${CODEX_STORAGE_ROOT:${CODEX_HOME:${user.home}/.d-codex}}`; if that default home path is not writable, the runtime falls back to `$PWD/.d-codex`
 - Compacted thread memory is stored separately from raw turns, with the number of recent turns preserved controlled by `codex.context.preserve-recent-turns`
 - Shell execution is approval-aware through `codex.shell.approval-mode`, which defaults to `review-sensitive`
 - Secrets are expected through environment variables such as `OPENAI_API_KEY`
@@ -38,23 +40,23 @@ mvn -pl codex-cli -am spring-boot:run
 Run the standalone stdio app-server from the repo root:
 
 ```bash
-mvn -pl codex-runtime-spring-ai -am spring-boot:run -Dspring-boot.run.mainClass=org.dean.codex.runtime.springai.appserver.CodexAppServerStdioApplication
+mvn -pl codex-runtime-spring-ai -am spring-boot:run
 ```
 
 Inside the console:
 
-- `:help` shows the available shell commands
-- `:new` starts a new thread
-- `:threads` lists persisted threads
-- `:skills` lists discovered skills and how to invoke them
-- `:use <thread-id-prefix>` switches the active thread
-- `:history` prints the current thread history
-- `:compact` compacts older completed turns into durable thread memory for the active thread
-- `:approvals` lists shell commands waiting for approval in the active thread
-- `:approve <approval-id-prefix>` runs a pending approved command and resumes the paused turn
-- `:reject <approval-id-prefix> [reason]` rejects a pending command and resumes the paused turn
-- `:interrupt` requests cooperative interruption for the latest active turn
-- `:steer <message>` sends additional guidance to the latest active turn
+- `/help` shows the available slash commands
+- `/new` starts a new thread
+- `/threads` lists persisted threads
+- `/skills` lists discovered skills and how to invoke them
+- `/resume <thread-id-prefix>` switches the active thread
+- `/history` prints the current thread history
+- `/compact` compacts older completed turns into durable thread memory for the active thread
+- `/approvals` lists shell commands waiting for approval in the active thread
+- `/approve <approval-id-prefix>` runs a pending approved command and resumes the paused turn
+- `/reject <approval-id-prefix> [reason]` rejects a pending command and resumes the paused turn
+- `/interrupt` requests cooperative interruption for the latest active turn
+- plain input sends additional guidance to the latest active regular turn
 - `exit` or `quit` exits the CLI
 
 The runtime now stores structured thread, turn, item, and command-approval data on disk, and the CLI is a thin client over a transport-agnostic `CodexAppServer` contract instead of calling runtime internals directly.
@@ -66,9 +68,9 @@ The current app-server surface models Codex-style lifecycle operations such as `
 CLI app-server launch settings live under `codex.cli.app-server.*` (`main-class`, `command`, and request timeout), with defaults wired for local development.
 Underneath that contract, `CodexRuntimeGateway` remains the async runtime surface that owns per-thread execution and notifications.
 The CLI now streams typed turn items as a turn runs, including user messages, plans, tool calls, tool results, approvals, runtime errors, and assistant messages.
-The runtime now also has a first-class skill discovery layer. It scans user and workspace `SKILL.md` files, exposes them through the runtime gateway, supports `:skills` in the CLI, and injects explicitly selected skills such as `$reviewer` into the agent prompt for the current turn.
+The runtime now also has a first-class skill discovery layer. It scans user and workspace `SKILL.md` files, exposes them through the runtime gateway, supports `/skills` in the CLI, and injects explicitly selected skills such as `$reviewer` into the agent prompt for the current turn.
 The runtime now has a dedicated context-management seam as well. Older completed turns can be compacted into a separate durable `ThreadMemory` record, and a `ThreadContextReconstructionService` rebuilds structured prompt context from that memory plus recent turns, messages, and activities before the agent plans the next step.
-`turn/steer` is currently cooperative: steering inputs are incorporated between planner steps instead of interrupting an in-flight LLM call.
+`turn/steer` is currently cooperative behind the CLI: plain user input is incorporated between planner steps instead of interrupting an in-flight LLM call.
 The local toolset includes workspace search, targeted patching, and shell commands that can be auto-allowed, flagged for approval, blocked by policy, and explicitly approved or rejected from the CLI. Repository inspection or mutation can still happen through normal command execution when appropriate. Approval-required commands pause the current turn and continue the same task flow after approval or rejection.
 
 ## Build and Test

@@ -10,6 +10,7 @@ import org.dean.codex.protocol.conversation.ThreadSummary;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -56,7 +57,8 @@ public class DefaultThreadCatalogService implements ThreadCatalogService {
         boolean archivedOnly = explicitArchivedFilter && params.archived();
         stream = stream.filter(thread -> explicitArchivedFilter ? archivedOnly == thread.archived() : !thread.archived());
         if (params != null && params.cwd() != null && !params.cwd().isBlank()) {
-            stream = stream.filter(thread -> params.cwd().equals(thread.cwd()));
+            String normalizedCwd = normalizeCwd(params.cwd());
+            stream = stream.filter(thread -> normalizedCwd.equals(normalizeCwd(thread.cwd())));
         }
         if (params != null && params.searchTerm() != null && !params.searchTerm().isBlank()) {
             String needle = params.searchTerm().toLowerCase();
@@ -168,6 +170,18 @@ public class DefaultThreadCatalogService implements ThreadCatalogService {
             case SUB_AGENT -> ThreadSourceKind.SUB_AGENT;
             case UNKNOWN -> ThreadSourceKind.UNKNOWN;
         };
+    }
+
+    private String normalizeCwd(String cwd) {
+        if (cwd == null || cwd.isBlank()) {
+            return "";
+        }
+        try {
+            return Path.of(cwd).toAbsolutePath().normalize().toString();
+        }
+        catch (RuntimeException exception) {
+            return cwd.trim();
+        }
     }
 
     private record ThreadCursor(ThreadSortKey sortKey, Instant sortValue, ThreadId threadId) {

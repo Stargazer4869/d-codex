@@ -62,7 +62,7 @@ Owns Spring AI integration:
 - runtime defaults
 - single Codex agent implementation
 
-This module ships `codex-runtime-defaults.yml`, not `application.yml`.
+This module ships shared defaults in `codex-runtime-defaults.yml` and now also owns a small runnable `application.yml` for direct stdio app-server startup.
 
 ### `codex-cli`
 

@@ -11,4 +11,8 @@ public interface TurnControl {
     default List<String> drainSteeringInputs() {
         return List.of();
     }
+
+    default List<MailboxTurnMessage> drainMailboxMessages() {
+        return List.of();
+    }
 }

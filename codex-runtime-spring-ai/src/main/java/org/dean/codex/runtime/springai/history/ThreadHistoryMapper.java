@@ -11,11 +11,13 @@ import org.dean.codex.protocol.history.HistoryRuntimeErrorItem;
 import org.dean.codex.protocol.history.HistorySkillUseItem;
 import org.dean.codex.protocol.history.HistoryToolCallItem;
 import org.dean.codex.protocol.history.HistoryCollabToolCallItem;
+import org.dean.codex.protocol.history.HistoryMailboxMessageItem;
 import org.dean.codex.protocol.history.HistoryToolResultItem;
 import org.dean.codex.protocol.history.ThreadHistoryItem;
 import org.dean.codex.protocol.item.AgentMessageItem;
 import org.dean.codex.protocol.item.ApprovalItem;
 import org.dean.codex.protocol.item.CollabToolCallItem;
+import org.dean.codex.protocol.item.MailboxMessageItem;
 import org.dean.codex.protocol.item.PlanItem;
 import org.dean.codex.protocol.item.RawModelOutputItem;
 import org.dean.codex.protocol.item.RuntimeErrorItem;
@@ -49,6 +51,15 @@ public final class ThreadHistoryMapper {
         }
         if (item instanceof AgentMessageItem agentMessageItem) {
             return List.of(new HistoryMessageItem(turnId, MessageRole.ASSISTANT, agentMessageItem.text(), agentMessageItem.createdAt()));
+        }
+        if (item instanceof MailboxMessageItem mailboxMessageItem) {
+            return List.of(new HistoryMailboxMessageItem(
+                    turnId,
+                    mailboxMessageItem.senderThreadId(),
+                    mailboxMessageItem.receiverThreadId(),
+                    mailboxMessageItem.deliveryKind(),
+                    mailboxMessageItem.text(),
+                    mailboxMessageItem.createdAt()));
         }
         if (item instanceof PlanItem planItem) {
             return List.of(new HistoryPlanItem(turnId, planItem.plan(), planItem.createdAt()));

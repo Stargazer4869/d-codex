@@ -39,6 +39,8 @@ class CodexCliAppServerPropertiesTest {
             assertTrue(command.contains("--logging.level.root=OFF"));
             assertTrue(command.contains("--logging.level.org.dean.codex=OFF"));
             assertTrue(command.contains("--logging.level.org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor=OFF"));
+            assertTrue(command.contains("--logging.level.io.netty.resolver.dns.DnsServerAddressStreamProviders=OFF"));
+            assertTrue(command.contains("--logging.level.org.springframework.ai.openai.metadata.support.OpenAiResponseHeaderExtractor=OFF"));
         });
     }
 
@@ -58,6 +60,8 @@ class CodexCliAppServerPropertiesTest {
             assertTrue(command.contains("--logging.level.root=OFF"));
             assertTrue(command.contains("--logging.level.org.dean.codex=OFF"));
             assertTrue(command.contains("--logging.level.org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor=OFF"));
+            assertTrue(command.contains("--logging.level.io.netty.resolver.dns.DnsServerAddressStreamProviders=OFF"));
+            assertTrue(command.contains("--logging.level.org.springframework.ai.openai.metadata.support.OpenAiResponseHeaderExtractor=OFF"));
             assertFalse(command.stream().anyMatch(token ->
                     token.equals("org.dean.codex.runtime.springai.appserver.CodexAppServerStdioApplication")));
         });

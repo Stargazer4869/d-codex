@@ -1,0 +1,23 @@
+spring:
+  config:
+    import: optional:classpath:codex-runtime-defaults.yml
+  main:
+    web-application-type: none
+
+logging:
+  level:
+    org.dean.codex: ${CODEX_LOG_LEVEL:WARN}
+    org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor: OFF
+
+codex:
+  workspace-root: ${user.dir}
+  storage-root: ${CODEX_STORAGE_ROOT:${CODEX_HOME:${user.home}/.d-codex}}
+  shell:
+    approval-mode: ${CODEX_SHELL_APPROVAL_MODE:review-sensitive}
+    timeout-seconds: ${CODEX_SHELL_TIMEOUT_SECONDS:60}
+  skills:
+    enabled: ${CODEX_SKILLS_ENABLED:true}
+    user-root: ${CODEX_USER_SKILLS_ROOT:}
+    workspace-relative-root: ${CODEX_WORKSPACE_SKILLS_ROOT:.codex/skills}
+  context:
+    preserve-recent-turns: ${CODEX_CONTEXT_PRESERVE_RECENT_TURNS:4}

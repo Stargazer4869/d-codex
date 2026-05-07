@@ -111,6 +111,9 @@ public class CodexProperties {
         private boolean emitRawOutputItems = false;
         private String reasoningEffort = "";
         private String reasoningSummaryMode = "";
+        private String transportMode = "chat-fallback";
+        private boolean responsesStore = true;
+        private boolean responsesEmitTools = false;
 
         public int getContextWindow() {
             return contextWindow;
@@ -150,6 +153,30 @@ public class CodexProperties {
 
         public void setReasoningSummaryMode(String reasoningSummaryMode) {
             this.reasoningSummaryMode = reasoningSummaryMode;
+        }
+
+        public String getTransportMode() {
+            return transportMode;
+        }
+
+        public void setTransportMode(String transportMode) {
+            this.transportMode = transportMode;
+        }
+
+        public boolean isResponsesStore() {
+            return responsesStore;
+        }
+
+        public void setResponsesStore(boolean responsesStore) {
+            this.responsesStore = responsesStore;
+        }
+
+        public boolean isResponsesEmitTools() {
+            return responsesEmitTools;
+        }
+
+        public void setResponsesEmitTools(boolean responsesEmitTools) {
+            this.responsesEmitTools = responsesEmitTools;
         }
     }
 

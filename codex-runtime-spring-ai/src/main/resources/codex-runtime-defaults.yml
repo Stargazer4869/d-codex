@@ -1,3 +1,8 @@
+logging:
+  level:
+    io.netty.resolver.dns.DnsServerAddressStreamProviders: ERROR
+    org.springframework.ai.openai.metadata.support.OpenAiResponseHeaderExtractor: ERROR
+
 spring:
   ai:
     chat:
@@ -23,6 +28,9 @@ codex:
     emit-raw-output-items: ${CODEX_EMIT_RAW_OUTPUT_ITEMS:false}
     reasoning-effort: ${CODEX_REASONING_EFFORT:}
     reasoning-summary-mode: ${CODEX_REASONING_SUMMARY_MODE:}
+    transport-mode: ${CODEX_MODEL_TRANSPORT_MODE:chat-fallback}
+    responses-store: ${CODEX_RESPONSES_STORE:true}
+    responses-emit-tools: ${CODEX_RESPONSES_EMIT_TOOLS:false}
   prompt:
     project-doc-max-bytes: ${CODEX_PROJECT_DOC_MAX_BYTES:32768}
     base-instructions-text: ${CODEX_BASE_INSTRUCTIONS_TEXT:}

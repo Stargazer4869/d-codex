@@ -105,6 +105,7 @@ import org.dean.codex.protocol.appserver.TurnSteerResponse;
 import org.dean.codex.protocol.tool.ShellCommandResult;
 import org.dean.codex.protocol.conversation.ConversationTurn;
 import org.dean.codex.protocol.conversation.ThreadId;
+import org.dean.codex.protocol.conversation.ThreadSource;
 import org.dean.codex.protocol.conversation.ThreadSummary;
 import org.dean.codex.protocol.runtime.RuntimeNotification;
 import org.dean.codex.protocol.runtime.RuntimeNotificationType;
@@ -112,6 +113,7 @@ import org.dean.codex.protocol.context.ReconstructedThreadContext;
 import org.dean.codex.runtime.springai.thread.DefaultThreadCatalogService;
 import org.dean.codex.runtime.springai.thread.ThreadCatalogService;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.nio.file.Path;
@@ -119,6 +121,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -129,35 +132,47 @@ import java.util.function.Consumer;
 @Component
 public class InProcessCodexAppServer implements CodexAppServer {
 
+    private static final String DEFAULT_CODEX_HOME_DIRECTORY_NAME = ".d-codex";
+
     private final CodexRuntimeGateway runtimeGateway;
     private final ShellCommandTool shellCommandTool;
     private final ExecSessionManager execSessionManager;
     private final ThreadCatalogService threadCatalogService;
+    private final Path codexHome;
     private final Map<ThreadId, List<BackgroundTerminalRef>> backgroundTerminals = new ConcurrentHashMap<>();
 
     @Autowired
     public InProcessCodexAppServer(CodexRuntimeGateway runtimeGateway,
                                    ShellCommandTool shellCommandTool,
                                    ExecSessionManager execSessionManager,
-                                   ThreadCatalogService threadCatalogService) {
+                                   ThreadCatalogService threadCatalogService,
+                                   @Qualifier("codexStorageRoot") Path codexHome) {
         this.runtimeGateway = runtimeGateway;
         this.shellCommandTool = shellCommandTool;
         this.execSessionManager = execSessionManager;
         this.threadCatalogService = threadCatalogService == null ? new DefaultThreadCatalogService() : threadCatalogService;
+        this.codexHome = normalizeCodexHome(codexHome);
     }
 
     public InProcessCodexAppServer(CodexRuntimeGateway runtimeGateway) {
-        this(runtimeGateway, null, null, new DefaultThreadCatalogService());
+        this(runtimeGateway, null, null, new DefaultThreadCatalogService(), defaultCodexHome());
     }
 
     public InProcessCodexAppServer(CodexRuntimeGateway runtimeGateway, ShellCommandTool shellCommandTool) {
-        this(runtimeGateway, shellCommandTool, null, new DefaultThreadCatalogService());
+        this(runtimeGateway, shellCommandTool, null, new DefaultThreadCatalogService(), defaultCodexHome());
     }
 
     public InProcessCodexAppServer(CodexRuntimeGateway runtimeGateway,
                                    ShellCommandTool shellCommandTool,
                                    ExecSessionManager execSessionManager) {
-        this(runtimeGateway, shellCommandTool, execSessionManager, new DefaultThreadCatalogService());
+        this(runtimeGateway, shellCommandTool, execSessionManager, new DefaultThreadCatalogService(), defaultCodexHome());
+    }
+
+    public InProcessCodexAppServer(CodexRuntimeGateway runtimeGateway,
+                                   ShellCommandTool shellCommandTool,
+                                   ExecSessionManager execSessionManager,
+                                   ThreadCatalogService threadCatalogService) {
+        this(runtimeGateway, shellCommandTool, execSessionManager, threadCatalogService, defaultCodexHome());
     }
 
     @Override
@@ -174,6 +189,7 @@ public class InProcessCodexAppServer implements CodexAppServer {
         private final Map<ThreadId, AutoCloseable> runtimeSubscriptions = new ConcurrentHashMap<>();
         private final Set<String> optOutNotificationMethods = new HashSet<>();
         private final AutoCloseable execSubscription;
+        private String clientName;
         private String clientVersion;
         private boolean initializeCalled;
         private boolean initializedAcknowledged;
@@ -189,13 +205,14 @@ public class InProcessCodexAppServer implements CodexAppServer {
             }
             initializeCalled = true;
             optOutNotificationMethods.clear();
+            clientName = params == null || params.clientInfo() == null ? null : normalizeClientName(params.clientInfo().name());
             clientVersion = params == null || params.clientInfo() == null ? null : normalizeClientVersion(params.clientInfo().version());
             if (params != null && params.capabilities() != null) {
                 optOutNotificationMethods.addAll(params.capabilities().optOutNotificationMethods());
             }
             return new InitializeResponse(
                     buildUserAgent(params),
-                    Path.of(System.getProperty("user.home"), ".codex-java").toAbsolutePath().normalize().toString(),
+                    codexHome.toString(),
                     "desktop",
                     System.getProperty("os.name", "unknown"));
         }
@@ -213,20 +230,19 @@ public class InProcessCodexAppServer implements CodexAppServer {
             ensureReady();
             ThreadSummary thread = runtimeGateway.threadStart(params == null ? "" : params.title());
             String cliVersion = currentClientVersion();
-            if (params != null && (params.sandboxMode() != null || params.approvalMode() != null || cliVersion != null)) {
-                thread = applyMetadataUpdate(
-                        thread,
-                        thread.threadId(),
-                        null,
-                        null,
-                        null,
-                        params.sandboxMode(),
-                        params.approvalMode(),
-                        null,
-                        null,
-                        null,
-                        cliVersion);
-            }
+            thread = applyMetadataUpdate(
+                    thread,
+                    thread.threadId(),
+                    null,
+                    null,
+                    null,
+                    params == null ? null : params.sandboxMode(),
+                    params == null ? null : params.approvalMode(),
+                    null,
+                    null,
+                    null,
+                    cliVersion,
+                    currentThreadSource());
             ensureRuntimeSubscriptions(List.of(thread.threadId()));
             publish(new ThreadStartedNotification(thread));
             return new ThreadStartResponse(thread);
@@ -239,8 +255,9 @@ public class InProcessCodexAppServer implements CodexAppServer {
             boolean alreadyLoaded = runtimeGateway.loadedThreads().contains(threadId);
             ThreadSummary thread = runtimeGateway.threadResume(threadId);
             String cliVersion = currentClientVersion();
-            if (cliVersion != null) {
-                thread = applyMetadataUpdate(thread, thread.threadId(), null, null, null, null, null, null, null, null, cliVersion);
+            ThreadSource source = thread.source() == ThreadSource.UNKNOWN ? currentThreadSource() : null;
+            if (cliVersion != null || source != null) {
+                thread = applyMetadataUpdate(thread, thread.threadId(), null, null, null, null, null, null, null, null, cliVersion, source);
             }
             ReconstructedThreadContext reconstructedContext = runtimeGateway.reconstructThreadContext(threadId);
             ensureRuntimeSubscriptions(loadedRelatedThreadIds(thread.threadId()));
@@ -307,7 +324,7 @@ public class InProcessCodexAppServer implements CodexAppServer {
             ThreadSummary thread = runtimeGateway.threadFork(params);
             String cliVersion = currentClientVersion();
             if (cliVersion != null) {
-                thread = applyMetadataUpdate(thread, thread.threadId(), null, null, null, null, null, null, null, null, cliVersion);
+                thread = applyMetadataUpdate(thread, thread.threadId(), null, null, null, null, null, null, null, null, cliVersion, null);
             }
             ensureRuntimeSubscriptions(List.of(thread.threadId()));
             publish(new ThreadStartedNotification(thread));
@@ -401,7 +418,8 @@ public class InProcessCodexAppServer implements CodexAppServer {
                     params.gitSha(),
                     params.gitBranch(),
                     params.gitOriginUrl(),
-                    cliVersion);
+                    cliVersion,
+                    null);
             publish(new ThreadMetadataUpdatedNotification(updated));
             return new ThreadMetadataUpdateResponse(updated);
         }
@@ -416,7 +434,8 @@ public class InProcessCodexAppServer implements CodexAppServer {
                                                  String gitSha,
                                                  String gitBranch,
                                                  String gitOriginUrl,
-                                                 String cliVersion) {
+                                                 String cliVersion,
+                                                 ThreadSource source) {
             ThreadSummary updated = runtimeGateway.updateThreadMetadata(
                     threadId,
                     cwd,
@@ -427,7 +446,8 @@ public class InProcessCodexAppServer implements CodexAppServer {
                     gitSha,
                     gitBranch,
                     gitOriginUrl,
-                    cliVersion);
+                    cliVersion,
+                    source);
             if (updated.promptState() == null && current != null && current.promptState() != null) {
                 return updated.withPromptState(current.promptState());
             }
@@ -879,13 +899,14 @@ public class InProcessCodexAppServer implements CodexAppServer {
         }
 
         private void publishRuntimeNotification(RuntimeNotification notification) {
-            if (notification == null || notification.turn() == null) {
+            if (notification == null) {
                 return;
             }
             AppServerNotification mapped = switch (notification.type()) {
-                case TURN_STARTED -> new TurnStartedNotification(notification.turn());
-                case TURN_ITEM -> new TurnItemNotification(notification.turn(), notification.item());
-                case TURN_COMPLETED -> new TurnCompletedNotification(notification.turn(), notification.finalAnswer());
+                case TURN_STARTED -> notification.turn() == null ? null : new TurnStartedNotification(notification.turn());
+                case TURN_ITEM -> notification.turn() == null ? null : new TurnItemNotification(notification.turn(), notification.item());
+                case TURN_COMPLETED -> notification.turn() == null ? null : new TurnCompletedNotification(notification.turn(), notification.finalAnswer());
+                case AGENT_MAILBOX_UPDATED -> notification.threadId() == null ? null : new AgentMailboxUpdatedNotification(agentControl().mailboxState(notification.threadId()));
                 case THREAD_STARTED, THREAD_RESUMED -> null;
             };
             if (mapped != null) {
@@ -963,11 +984,27 @@ public class InProcessCodexAppServer implements CodexAppServer {
             return clientVersion;
         }
 
+        private ThreadSource currentThreadSource() {
+            return isCliClient() ? ThreadSource.CLI : ThreadSource.APP_SERVER;
+        }
+
+        private boolean isCliClient() {
+            return clientName != null && clientName.contains("cli");
+        }
+
         private String normalizeClientVersion(String version) {
             if (version == null) {
                 return null;
             }
             String normalized = version.trim();
+            return normalized.isEmpty() ? null : normalized;
+        }
+
+        private String normalizeClientName(String name) {
+            if (name == null) {
+                return null;
+            }
+            String normalized = name.trim().toLowerCase(Locale.ROOT);
             return normalized.isEmpty() ? null : normalized;
         }
 
@@ -1204,5 +1241,17 @@ public class InProcessCodexAppServer implements CodexAppServer {
             throw new IllegalArgumentException("Exec session " + sessionId + " does not belong to thread " + threadId.value());
         }
         return session;
+    }
+
+    private static Path defaultCodexHome() {
+        return Path.of(System.getProperty("user.home"), DEFAULT_CODEX_HOME_DIRECTORY_NAME)
+                .toAbsolutePath()
+                .normalize();
+    }
+
+    private static Path normalizeCodexHome(Path codexHome) {
+        return (codexHome == null ? defaultCodexHome() : codexHome)
+                .toAbsolutePath()
+                .normalize();
     }
 }

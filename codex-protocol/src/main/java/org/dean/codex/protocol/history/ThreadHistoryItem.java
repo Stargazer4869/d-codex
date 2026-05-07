@@ -10,6 +10,7 @@ import java.time.Instant;
 @JsonSubTypes({
         @JsonSubTypes.Type(value = HistoryMessageItem.class, name = "historyMessage"),
         @JsonSubTypes.Type(value = HistoryImageItem.class, name = "historyImage"),
+        @JsonSubTypes.Type(value = HistoryMailboxMessageItem.class, name = "historyMailboxMessage"),
         @JsonSubTypes.Type(value = HistoryToolCallItem.class, name = "historyToolCall"),
         @JsonSubTypes.Type(value = HistoryToolResultItem.class, name = "historyToolResult"),
         @JsonSubTypes.Type(value = HistoryCollabToolCallItem.class, name = "historyCollabToolCall"),
@@ -23,6 +24,7 @@ import java.time.Instant;
 })
 public sealed interface ThreadHistoryItem permits HistoryMessageItem,
         HistoryImageItem,
+        HistoryMailboxMessageItem,
         HistoryToolCallItem,
         HistoryToolResultItem,
         HistoryCollabToolCallItem,

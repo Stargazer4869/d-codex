@@ -130,7 +130,7 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                     false,
                     List.of()),
             capability("send_message",
-                    "queue a plain message to an existing sub-agent thread without starting work",
+                    "queue a plain message to an existing sub-agent thread without starting work; threadId may be the full id, a unique id prefix, the agent nickname, or the agent path",
                     """
                     {
                       "action": "send_message",
@@ -141,7 +141,7 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                     false,
                     List.of()),
             capability("assign_task",
-                    "queue work for an existing sub-agent thread and let it start if idle",
+                    "queue work for an existing sub-agent thread and let it start if idle; threadId may be the full id, a unique id prefix, the agent nickname, or the agent path",
                     """
                     {
                       "action": "assign_task",
@@ -151,7 +151,7 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                     }""",
                     defaultOutputSchema("threadId", "status", "queued", "interrupted"),
                     false,
-                    List.of()),
+                    List.of("Do not use assign_task on an agent that is already RUNNING unless you are intentionally redirecting it with interrupt=true.")),
             capability("send_input",
                     "compatibility alias for assign_task",
                     """
@@ -163,20 +163,23 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                     }""",
                     defaultOutputSchema("threadId", "status", "queued", "interrupted"),
                     false,
-                    List.of()),
+                    List.of("Prefer send_message for queued follow-up context. Do not duplicate active work on a RUNNING agent.")),
             capability("wait_agent",
-                    "wait for one or more sub-agents to change status or mailbox state",
+                    "wait for one or more sub-agents to change status or mailbox state; threadIds may use the full id, a unique id prefix, the agent nickname, or the agent path",
                     """
                     {
                       "action": "wait_agent",
                       "threadIds": ["agent-thread-id"],
-                      "timeoutMillis": 1000
+                      "timeoutMillis": 5000
                     }""",
                     defaultOutputSchema("threadIds", "timedOut", "results"),
                     false,
-                    List.of()),
+                    List.of(
+                            "If the agent is still RUNNING after a timeout, wait again instead of reassigning the same task.",
+                            "If wait_agent returns a non-empty finalAnswer, use that result instead of waiting again.",
+                            "If a MAILBOX child-completion message for that agent is already present in context, continue with that result instead of waiting again.")),
             capability("resume_agent",
-                    "resume a paused or waiting sub-agent thread",
+                    "resume a paused or waiting sub-agent thread; threadId may be the full id, a unique id prefix, the agent nickname, or the agent path",
                     """
                     {
                       "action": "resume_agent",
@@ -184,9 +187,9 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                     }""",
                     defaultOutputSchema("threadId", "status"),
                     false,
-                    List.of()),
+                    List.of("Do not use resume_agent on an agent that is already RUNNING.")),
             capability("close_agent",
-                    "close a sub-agent thread subtree",
+                    "close a sub-agent thread subtree; threadId may be the full id, a unique id prefix, the agent nickname, or the agent path",
                     """
                     {
                       "action": "close_agent",

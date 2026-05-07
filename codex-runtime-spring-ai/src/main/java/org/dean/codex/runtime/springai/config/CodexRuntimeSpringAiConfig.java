@@ -1,5 +1,6 @@
 package org.dean.codex.runtime.springai.config;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.dean.codex.core.approval.CommandApprovalService;
 import org.dean.codex.core.approval.CommandApprovalStore;
 import org.dean.codex.core.context.ContextManager;
@@ -23,6 +24,9 @@ import org.dean.codex.runtime.springai.conversation.FileSystemConversationStore;
 import org.dean.codex.runtime.springai.history.FileSystemThreadHistoryStore;
 import org.dean.codex.runtime.springai.model.ChatClientResponsesModelClient;
 import org.dean.codex.runtime.springai.model.FileSystemThreadModelSessionStateStore;
+import org.dean.codex.runtime.springai.model.OpenAiResponsesCompactClient;
+import org.dean.codex.runtime.springai.model.OpenAiResponsesModelClient;
+import org.dean.codex.runtime.springai.model.OpenAiResponsesSettings;
 import org.dean.codex.runtime.springai.model.ThreadModelSessionStateStore;
 import org.dean.codex.runtime.springai.prompt.BaseInstructionsResolver;
 import org.dean.codex.runtime.springai.prompt.DefaultBaseInstructionsResolver;
@@ -44,19 +48,26 @@ import org.dean.codex.runtime.springai.prompt.UserInstructionsResolver;
 import org.dean.codex.runtime.springai.skills.FileSystemSkillService;
 import org.dean.codex.tools.local.DuckDuckGoHtmlWebSearchBackend;
 import org.dean.codex.tools.local.PatternCommandApprovalPolicy;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.model.openai.autoconfigure.OpenAiChatProperties;
+import org.springframework.ai.model.openai.autoconfigure.OpenAiConnectionProperties;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.ai.chat.client.ChatClient;
 
-import java.nio.file.Path;
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 
 @Configuration
 @EnableConfigurationProperties(CodexProperties.class)
 public class CodexRuntimeSpringAiConfig {
+
+    private static final String DEFAULT_CODEX_HOME_DIRECTORY_NAME = ".d-codex";
 
     @Bean("codexWorkspaceRoot")
     public Path codexWorkspaceRoot(CodexProperties properties) {
@@ -67,20 +78,42 @@ public class CodexRuntimeSpringAiConfig {
         return Path.of(resolvedRoot).toAbsolutePath().normalize();
     }
 
+    @Bean
+    public ObjectMapper objectMapper() {
+        return new ObjectMapper().findAndRegisterModules();
+    }
+
     @Bean("codexStorageRoot")
-    public Path codexStorageRoot(CodexProperties properties) {
+    public Path codexStorageRoot(CodexProperties properties,
+                                 @Qualifier("codexWorkspaceRoot") Path workspaceRoot) {
         String configuredRoot = properties.getStorageRoot();
-        String resolvedRoot = configuredRoot == null || configuredRoot.isBlank()
-                ? Path.of(System.getProperty("user.home"), ".codex-java").toString()
-                : configuredRoot;
-        return Path.of(resolvedRoot).toAbsolutePath().normalize();
+        Path defaultCodexHome = defaultCodexHome();
+        Path requestedRoot = configuredRoot == null || configuredRoot.isBlank()
+                ? defaultCodexHome
+                : Path.of(configuredRoot).toAbsolutePath().normalize();
+        try {
+            return ensureWritableDirectory(requestedRoot, "Codex storage root");
+        }
+        catch (IllegalStateException exception) {
+            if (!requestedRoot.equals(defaultCodexHome)) {
+                throw exception;
+            }
+            Path workspaceFallback = workspaceRoot.resolve(DEFAULT_CODEX_HOME_DIRECTORY_NAME)
+                    .toAbsolutePath()
+                    .normalize();
+            System.err.printf("[storage] Default Codex home %s is not writable; using %s instead.%n",
+                    requestedRoot,
+                    workspaceFallback);
+            return ensureWritableDirectory(workspaceFallback, "workspace fallback Codex storage root");
+        }
     }
 
     @Bean("codexUserSkillsRoot")
-    public Path codexUserSkillsRoot(CodexProperties properties) {
+    public Path codexUserSkillsRoot(CodexProperties properties,
+                                    @Qualifier("codexStorageRoot") Path storageRoot) {
         String configuredRoot = properties.getSkills().getUserRoot();
         String resolvedRoot = configuredRoot == null || configuredRoot.isBlank()
-                ? Path.of(System.getProperty("user.home"), ".codex", "skills").toString()
+                ? storageRoot.resolve("skills").toString()
                 : configuredRoot;
         return Path.of(resolvedRoot).toAbsolutePath().normalize();
     }
@@ -116,8 +149,18 @@ public class CodexRuntimeSpringAiConfig {
     }
 
     @Bean
-    public ResponsesCompactClient responsesCompactClient(ChatClient.Builder chatClientBuilder) {
-        return new ChatClientResponsesCompactClient(chatClientBuilder);
+    public ResponsesCompactClient responsesCompactClient(ChatClient.Builder chatClientBuilder,
+                                                         ObjectMapper objectMapper,
+                                                         OpenAiConnectionProperties openAiConnectionProperties,
+                                                         OpenAiChatProperties openAiChatProperties,
+                                                         CodexProperties properties) {
+        return switch (ModelTransportMode.from(properties.getModel().getTransportMode())) {
+            case CHAT_FALLBACK -> new ChatClientResponsesCompactClient(chatClientBuilder);
+            case RESPONSES_HTTP -> new OpenAiResponsesCompactClient(
+                    responsesHttpClient(),
+                    objectMapper,
+                    responsesSettings(openAiConnectionProperties, openAiChatProperties, properties));
+        };
     }
 
     @Bean
@@ -126,8 +169,18 @@ public class CodexRuntimeSpringAiConfig {
     }
 
     @Bean
-    public ResponsesModelClient responsesModelClient(ChatClient.Builder chatClientBuilder) {
-        return new ChatClientResponsesModelClient(chatClientBuilder);
+    public ResponsesModelClient responsesModelClient(ChatClient.Builder chatClientBuilder,
+                                                     ObjectMapper objectMapper,
+                                                     OpenAiConnectionProperties openAiConnectionProperties,
+                                                     OpenAiChatProperties openAiChatProperties,
+                                                     CodexProperties properties) {
+        return switch (ModelTransportMode.from(properties.getModel().getTransportMode())) {
+            case CHAT_FALLBACK -> new ChatClientResponsesModelClient(chatClientBuilder);
+            case RESPONSES_HTTP -> new OpenAiResponsesModelClient(
+                    responsesHttpClient(),
+                    objectMapper,
+                    responsesSettings(openAiConnectionProperties, openAiChatProperties, properties));
+        };
     }
 
     @Bean
@@ -253,5 +306,66 @@ public class CodexRuntimeSpringAiConfig {
     @Bean("codexCommandTimeout")
     public Duration codexCommandTimeout(CodexProperties properties) {
         return Duration.ofSeconds(Math.max(1, properties.getShell().getTimeoutSeconds()));
+    }
+
+    private Path defaultCodexHome() {
+        return Path.of(System.getProperty("user.home"), DEFAULT_CODEX_HOME_DIRECTORY_NAME)
+                .toAbsolutePath()
+                .normalize();
+    }
+
+    private HttpClient responsesHttpClient() {
+        return HttpClient.newBuilder()
+                .followRedirects(HttpClient.Redirect.NORMAL)
+                .connectTimeout(Duration.ofSeconds(30))
+                .build();
+    }
+
+    private OpenAiResponsesSettings responsesSettings(OpenAiConnectionProperties openAiConnectionProperties,
+                                                      OpenAiChatProperties openAiChatProperties,
+                                                      CodexProperties properties) {
+        return new OpenAiResponsesSettings(
+                openAiConnectionProperties.getBaseUrl(),
+                responsesPath(openAiConnectionProperties.getBaseUrl(), openAiChatProperties.getCompletionsPath()),
+                openAiConnectionProperties.getApiKey(),
+                openAiConnectionProperties.getOrganizationId(),
+                openAiConnectionProperties.getProjectId(),
+                openAiChatProperties.getOptions() == null ? "" : openAiChatProperties.getOptions().getModel(),
+                openAiChatProperties.getOptions() == null ? null : openAiChatProperties.getOptions().getTemperature(),
+                openAiChatProperties.getOptions() == null ? null : openAiChatProperties.getOptions().getTopP(),
+                properties.getModel().isResponsesStore(),
+                properties.getModel().isResponsesEmitTools());
+    }
+
+    String responsesPath(String baseUrl, String completionsPath) {
+        String normalizedCompletionsPath = completionsPath == null ? "" : completionsPath.trim();
+        if (!normalizedCompletionsPath.isBlank()) {
+            if (normalizedCompletionsPath.endsWith("/chat/completions")) {
+                return normalizedCompletionsPath.substring(0,
+                        normalizedCompletionsPath.length() - "/chat/completions".length()) + "/responses";
+            }
+            if (normalizedCompletionsPath.endsWith("chat/completions")) {
+                return normalizedCompletionsPath.substring(0,
+                        normalizedCompletionsPath.length() - "chat/completions".length()) + "responses";
+            }
+        }
+        String normalizedBaseUrl = baseUrl == null ? "" : baseUrl.trim();
+        return normalizedBaseUrl.endsWith("/v1") ? "/responses" : "/v1/responses";
+    }
+
+    private Path ensureWritableDirectory(Path path, String label) {
+        try {
+            Files.createDirectories(path);
+        }
+        catch (IOException exception) {
+            throw new IllegalStateException("Unable to initialize " + label + " at " + path, exception);
+        }
+        if (!Files.isDirectory(path)) {
+            throw new IllegalStateException(label + " is not a directory: " + path);
+        }
+        if (!Files.isWritable(path)) {
+            throw new IllegalStateException(label + " is not writable: " + path);
+        }
+        return path;
     }
 }

@@ -12,8 +12,8 @@ Today the Java implementation has:
 - thread metadata centered on `ThreadSummary`, still much thinner than Codex's full metadata model
 - loaded-thread tracking, with Codex-style connection-scoped unload semantics plus the first reattachment-safe resume behavior
 - thread-scoped shell execution now has an explicit background-terminal cleanup slice, but lifecycle tracking is still much smaller than Codex
-- sub-agent runtime, persistence, and CLI UX are present in a first pass, and the existing control primitives are now exposed through the app-server/protocol boundary, but the collaboration model is still not Codex-grade
-- the collaboration split now distinguishes queue-only messaging from task-triggering assignment, but mailbox-style semantics are still missing
+- sub-agent runtime, persistence, and CLI UX are present in a first pass, and the existing control primitives are now exposed through the app-server/protocol boundary, but the collaboration model is still not fully Codex-grade
+- the collaboration split now distinguishes queue-only messaging from task-triggering assignment, and child completion now reaches the parent inbox as first-class mailbox mail, but richer mailbox timing semantics are still smaller than upstream
 
 Target behavior is:
 
@@ -233,6 +233,11 @@ Acceptance:
 - [x] support queueing messages to existing agents
 - [x] support waiting, resuming, listing, and closing agents
 - [x] surface mailbox updates through the app-server protocol
+- [x] deliver completed child results into the parent thread mailbox/history
+
+Follow-up:
+
+- parent inbox/result delivery now exists, but upstream-style answer-boundary timing behavior is still a later parity step
 
 Likely touch points:
 

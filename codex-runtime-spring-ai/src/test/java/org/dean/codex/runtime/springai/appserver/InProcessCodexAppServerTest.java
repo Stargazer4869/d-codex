@@ -35,6 +35,7 @@ import org.dean.codex.protocol.appserver.AgentSendMessageResponse;
 import org.dean.codex.protocol.appserver.AgentSpawnParams;
 import org.dean.codex.protocol.appserver.AgentSpawnResponse;
 import org.dean.codex.protocol.appserver.InitializeParams;
+import org.dean.codex.protocol.appserver.InitializeResponse;
 import org.dean.codex.protocol.appserver.InitializedNotification;
 import org.dean.codex.protocol.appserver.SkillsListParams;
 import org.dean.codex.protocol.appserver.CommandExecutionCompletedNotification;
@@ -104,6 +105,7 @@ import org.dean.codex.runtime.springai.model.ThreadModelSessionStateStore;
 import org.dean.codex.runtime.springai.runtime.DefaultCodexRuntimeGateway;
 import org.dean.codex.runtime.springai.prompt.ThreadPromptSnapshot;
 import org.dean.codex.runtime.springai.prompt.ThreadPromptStateStore;
+import org.dean.codex.runtime.springai.thread.DefaultThreadCatalogService;
 import org.dean.codex.core.tool.local.ShellCommandTool;
 import org.dean.codex.tools.local.PatternCommandApprovalPolicy;
 import org.dean.codex.tools.local.ShellCommandToolImpl;
@@ -149,6 +151,38 @@ class InProcessCodexAppServerTest {
             assertNotNull(notification);
             assertTrue(notification instanceof ThreadStartedNotification);
             assertEquals(threadId, ((ThreadStartedNotification) notification).thread().threadId());
+        }
+    }
+
+    @Test
+    void threadStartAssignsCliSourceForCliSessions() throws Exception {
+        CodexAppServer appServer = appServer(new NoOpTurnExecutor());
+
+        try (CodexAppServerSession session = appServer.connect()) {
+            session.initialize(new InitializeParams(
+                    new AppServerClientInfo("codex-java-cli", "Codex Java CLI", "1.0-SNAPSHOT"),
+                    new AppServerCapabilities(false, List.of())));
+            session.initialized(new InitializedNotification());
+
+            ThreadSummary thread = session.threadStart(new ThreadStartParams("CLI thread")).thread();
+            assertEquals(ThreadSource.CLI, thread.source());
+        }
+    }
+
+    @Test
+    void threadResumeBackfillsUnknownSourceForCliSessions() throws Exception {
+        ConversationStore store = new InMemoryConversationStore();
+        ThreadId threadId = store.createThread("Legacy thread");
+        CodexAppServer appServer = appServer(store, new NoOpTurnExecutor());
+
+        try (CodexAppServerSession session = appServer.connect()) {
+            session.initialize(new InitializeParams(
+                    new AppServerClientInfo("codex-java-cli", "Codex Java CLI", "1.0-SNAPSHOT"),
+                    new AppServerCapabilities(false, List.of())));
+            session.initialized(new InitializedNotification());
+
+            ThreadSummary resumed = session.threadResume(new ThreadResumeParams(threadId)).thread();
+            assertEquals(ThreadSource.CLI, resumed.source());
         }
     }
 
@@ -1183,6 +1217,23 @@ class InProcessCodexAppServerTest {
     }
 
     @Test
+    void initializeReportsResolvedCodexHome() throws Exception {
+        Path codexHome = workspaceRoot.resolve(".d-codex-custom");
+        CodexAppServer appServer = appServer(
+                new InMemoryConversationStore(),
+                new NoOpTurnExecutor(),
+                new NoOpShellCommandTool(),
+                new InMemoryExecSessionManager(),
+                codexHome);
+
+        try (CodexAppServerSession session = appServer.connect()) {
+            InitializeResponse response = session.initialize(defaultInitializeParams(List.of()));
+
+            assertEquals(codexHome.toAbsolutePath().normalize().toString(), response.codexHome());
+        }
+    }
+
+    @Test
     void notificationOptOutSuppressesExactMethodMatchesOnly() throws Exception {
         CodexAppServer appServer = appServer(new NoOpTurnExecutor());
         BlockingQueue<AppServerNotification> notifications = new LinkedBlockingQueue<>();
@@ -1224,6 +1275,14 @@ class InProcessCodexAppServerTest {
                                      TurnExecutor turnExecutor,
                                      ShellCommandTool shellCommandTool,
                                      ExecSessionManager execSessionManager) {
+        return appServer(store, turnExecutor, shellCommandTool, execSessionManager, null);
+    }
+
+    private CodexAppServer appServer(ConversationStore store,
+                                     TurnExecutor turnExecutor,
+                                     ShellCommandTool shellCommandTool,
+                                     ExecSessionManager execSessionManager,
+                                     Path codexHome) {
         SkillService skillService = new SkillService() {
             @Override
             public List<SkillMetadata> listSkills(boolean forceReload) {
@@ -1271,7 +1330,9 @@ class InProcessCodexAppServerTest {
                         modelSessionStateStore,
                         4),
                 shellCommandTool,
-                execSessionManager);
+                execSessionManager,
+                new DefaultThreadCatalogService(),
+                codexHome);
     }
 
     private static final class StubThreadListRuntimeGateway implements CodexRuntimeGateway {

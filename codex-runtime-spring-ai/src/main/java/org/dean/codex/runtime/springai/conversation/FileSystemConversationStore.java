@@ -236,7 +236,7 @@ public class FileSystemConversationStore implements ConversationStore {
                                                            String model,
                                                            String sandboxMode,
                                                            String approvalMode) {
-        return updateThreadMetadata(threadId, cwd, modelProvider, model, sandboxMode, approvalMode, null, null, null, null);
+        return updateThreadMetadata(threadId, cwd, modelProvider, model, sandboxMode, approvalMode, null, null, null, null, null);
     }
 
     @Override
@@ -250,10 +250,25 @@ public class FileSystemConversationStore implements ConversationStore {
                                                            String gitBranch,
                                                            String gitOriginUrl,
                                                            String cliVersion) {
+        return updateThreadMetadata(threadId, cwd, modelProvider, model, sandboxMode, approvalMode, gitSha, gitBranch, gitOriginUrl, cliVersion, null);
+    }
+
+    @Override
+    public synchronized ThreadSummary updateThreadMetadata(ThreadId threadId,
+                                                           String cwd,
+                                                           String modelProvider,
+                                                           String model,
+                                                           String sandboxMode,
+                                                           String approvalMode,
+                                                           String gitSha,
+                                                           String gitBranch,
+                                                           String gitOriginUrl,
+                                                           String cliVersion,
+                                                           ThreadSource source) {
         ThreadMetadata metadata = requireThread(threadId);
         Instant now = Instant.now();
         ThreadMetadata updatedMetadata = metadata
-                .withMetadata(cwd, modelProvider, model, sandboxMode, approvalMode, gitSha, gitBranch, gitOriginUrl, cliVersion)
+                .withMetadata(cwd, modelProvider, model, sandboxMode, approvalMode, gitSha, gitBranch, gitOriginUrl, cliVersion, source)
                 .withUpdatedAt(now);
         try {
             writeJson(threadMetadataFile(threadId), updatedMetadata);
@@ -781,7 +796,8 @@ public class FileSystemConversationStore implements ConversationStore {
                                             String newGitSha,
                                             String newGitBranch,
                                             String newGitOriginUrl,
-                                            String newCliVersion) {
+                                            String newCliVersion,
+                                            ThreadSource newSource) {
             return new ThreadMetadata(
                     threadId,
                     title,
@@ -799,7 +815,7 @@ public class FileSystemConversationStore implements ConversationStore {
                     normalizeMetadataField(newModelProvider, modelProvider),
                     normalizeMetadataField(newModel, model),
                     normalizeMetadataField(newCwd, cwd),
-                    source,
+                    newSource == null ? source : newSource,
                     archivedAt,
                     parentThreadId,
                     agentDepth,

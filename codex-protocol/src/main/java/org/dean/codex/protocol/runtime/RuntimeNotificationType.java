@@ -5,5 +5,6 @@ public enum RuntimeNotificationType {
     THREAD_RESUMED,
     TURN_STARTED,
     TURN_ITEM,
-    TURN_COMPLETED
+    TURN_COMPLETED,
+    AGENT_MAILBOX_UPDATED
 }

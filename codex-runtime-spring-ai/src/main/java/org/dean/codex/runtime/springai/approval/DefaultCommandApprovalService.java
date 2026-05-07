@@ -22,6 +22,8 @@ import java.util.List;
 
 public class DefaultCommandApprovalService implements CommandApprovalService {
 
+    private static final int MAX_OUTPUT_PREVIEW_CHARS = 600;
+
     private final CommandApprovalStore commandApprovalStore;
     private final ConversationStore conversationStore;
     private final ThreadHistoryStore threadHistoryStore;
@@ -60,7 +62,7 @@ public class DefaultCommandApprovalService implements CommandApprovalService {
     public synchronized CommandApprovalRequest approve(ThreadId threadId, String approvalIdPrefix) {
         CommandApprovalRequest request = resolvePending(threadId, approvalIdPrefix);
         Instant now = Instant.now();
-        ShellCommandResult result = shellCommandTool.runApprovedCommand(request.command());
+        ShellCommandResult result = shellCommandTool.runApprovedCommand(request.threadId(), request.command());
         CommandApprovalRequest approvedRequest = new CommandApprovalRequest(
                 request.approvalId(),
                 request.threadId(),
@@ -180,7 +182,27 @@ public class DefaultCommandApprovalService implements CommandApprovalService {
         if (result.error() != null && !result.error().isBlank()) {
             summary.append(" error=").append(result.error());
         }
+        appendOutputPreview(summary, "stdout", result.stdout());
+        appendOutputPreview(summary, "stderr", result.stderr());
         return summary.toString();
+    }
+
+    private void appendOutputPreview(StringBuilder summary, String label, String content) {
+        String preview = summarizeOutput(content);
+        if (!preview.isBlank()) {
+            summary.append(' ').append(label).append('=').append(preview);
+        }
+    }
+
+    private String summarizeOutput(String content) {
+        if (content == null || content.isBlank()) {
+            return "";
+        }
+        String normalized = content.replaceAll("\\s+", " ").trim();
+        if (normalized.length() <= MAX_OUTPUT_PREVIEW_CHARS) {
+            return normalized;
+        }
+        return normalized.substring(0, MAX_OUTPUT_PREVIEW_CHARS) + "...";
     }
 
     private String shortApprovalId(ApprovalId approvalId) {

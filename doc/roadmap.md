@@ -169,9 +169,9 @@ Reference points:
 The current Java implementation has multi-agent mechanics, but not yet Codex-grade collaboration semantics:
 
 - delegation is still more runtime-local than collaboration-item-first
-- the runtime now exposes `send_message` and `assign_task`, and mailbox state is visible through `agent/mailbox/updated`, but `send_input` remains a compatibility alias
-- waiting behavior is now mailbox-sequence driven, but it is still simpler than Codex’s richer delivery/mailbox model
-- collaboration is still not represented as first-class thread items/events in the same way
+- the runtime now exposes `send_message` and `assign_task`, mailbox state is visible through `agent/mailbox/updated`, and child completion now reaches the parent thread as first-class mailbox mail, but `send_input` remains a compatibility alias
+- waiting behavior is now mailbox-sequence driven with parent inbox/result delivery, but it is still simpler than Codex’s fuller mailbox timing and answer-boundary model
+- collaboration is now represented through `collabToolCall` plus mailbox items, but the overall lifecycle is still smaller than upstream MultiAgentV2
 - the Java app-server currently exposes explicit `agent/*` controls, while upstream Codex’s public client-facing shape is more centered on collaboration tools plus streamed `collabToolCall` items
 - there are no internal system-owned agent flows such as guardian/reviewer agents
 - CLI supervision is still shallow compared with Codex’s broader agent-control model
@@ -189,23 +189,33 @@ The current Java implementation has multi-agent mechanics, but not yet Codex-gra
 
 These remain important, but they should follow the top three because they depend on the runtime shape being correct first.
 
-### 4. App-server/client lifecycle
+### 4. Native Responses backend
+
+The Java runtime now has most of the internal Responses-shaped seam, but the actual model transport is still chat-backed through Spring AI adapters. The next transport step is to move ordinary turns and compaction onto a native Responses backend, starting with HTTP and then adding websocket/session transport where provider support exists.
+
+Reference points:
+
+- `doc/design/responses-api-parity.md`
+- `doc/design/native-responses-backend-migration.md`
+- `codex-runtime-spring-ai/src/main/java/org/dean/codex/runtime/springai/model/ChatClientResponsesModelClient.java`
+
+### 5. App-server/client lifecycle
 
 The transport boundary should keep growing into a stronger client-facing runtime surface with clearer initialization, connection-scoped behavior, and transport semantics.
 
-### 5. Metadata and indexing
+### 6. Metadata and indexing
 
 Threads need richer metadata for listing, filtering, and resuming. This is partly a thread-management concern, but it is also a standalone indexing concern once more sessions accumulate.
 
-### 6. Extensibility surface
+### 7. Extensibility surface
 
 Codex grows through skills, plugins, apps, and related discovery flows. The Java version should extend the skill system without hard-coding all future extension types into the CLI.
 
-### 7. Approvals, sandboxing, and execution UX
+### 8. Approvals, sandboxing, and execution UX
 
 Approval-aware execution exists, but the user workflow still needs to feel more like a first-class runtime path.
 
-### 8. Context reconstruction and compaction
+### 9. Context reconstruction and compaction
 
 Prompt construction should keep moving out of the agent and into reusable runtime services, with compaction and replay getting closer to Codex-style behavior over time.
 The reconstructed thread model should also carry a first-class replay summary for collaboration and compaction, so resumed/history views do not depend on CLI-only formatting to tell the stored thread story. That summary now also appears on the app-server `thread/read` response model, so non-CLI clients can consume the same structured replay story directly.

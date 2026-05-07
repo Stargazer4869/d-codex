@@ -88,7 +88,6 @@ import org.dean.codex.protocol.agent.AgentSummary;
 import org.dean.codex.protocol.agent.AgentWaitResult;
 import org.dean.codex.protocol.agent.AgentSpawnRequest;
 import org.dean.codex.protocol.agent.AgentMessage;
-import org.dean.codex.protocol.agent.AgentMailboxState;
 import org.dean.codex.protocol.context.ReconstructedThreadContext;
 import org.dean.codex.protocol.context.ReconstructedReplayItem;
 import org.dean.codex.protocol.context.ThreadMemory;
@@ -104,6 +103,8 @@ import org.dean.codex.protocol.item.ToolCallItem;
 import org.dean.codex.protocol.item.ToolResultItem;
 import org.dean.codex.protocol.item.CollabToolCallItem;
 import org.dean.codex.protocol.item.CollabToolCallStatus;
+import org.dean.codex.protocol.item.MailboxDeliveryKind;
+import org.dean.codex.protocol.item.MailboxMessageItem;
 import org.dean.codex.protocol.item.RawModelOutputItem;
 import org.dean.codex.protocol.item.ReasoningItem;
 import org.dean.codex.protocol.tool.CommandApprovalDecision;
@@ -365,6 +366,19 @@ class CodexConsoleRunnerTest {
     }
 
     @Test
+    void streamedMailboxItemsAreRenderedClearly() throws Exception {
+        StubAppServer runtime = new StubAppServer();
+        runtime.emitMailboxActivity = true;
+        CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());
+
+        CapturedRun captured = captureRun(() -> runner.run(), "inspect repo\n");
+
+        assertTrue(captured.stdout().contains("[mailbox] child-completion"));
+        assertTrue(captured.stdout().contains("thread-a ->"));
+        assertTrue(captured.stdout().contains("README reviewed"));
+    }
+
+    @Test
     void historyCommandShowsReplayedCollaborationContextFromReconstruction() throws Exception {
         StubAppServer runtime = new StubAppServer();
         runtime.customThreadReadResponse = new ThreadReadResponse(
@@ -492,6 +506,18 @@ class CodexConsoleRunnerTest {
     }
 
     @Test
+    void rejectCommandResumesTurn() throws Exception {
+        StubAppServer runtime = new StubAppServer();
+        CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());
+
+        String console = captureConsole(() -> assertTrue(runner.handleConsoleCommand("/reject approval- not-now")));
+
+        assertTrue(console.contains("Rejected command"));
+        assertTrue(console.contains("resumed turn"));
+        assertEquals(1, runtime.turnResumeCount());
+    }
+
+    @Test
     void approveCommandDoesNotBlockOnTurnCompletion() throws Exception {
         StubAppServer runtime = new StubAppServer(true, false, false, false, false, true, false, true);
         CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());
@@ -525,7 +551,7 @@ class CodexConsoleRunnerTest {
         String console = captureConsole(() -> assertTrue(runner.handleConsoleCommand("/compact")));
         assertTrue(console.contains("[compaction] started"));
         assertTrue(console.contains("[compaction] completed"));
-        assertTrue(console.contains("[compaction] response"));
+        assertFalse(console.contains("[compaction] response"));
         assertTrue(console.contains("[memory] compatibility snapshot"));
     }
 
@@ -787,6 +813,7 @@ class CodexConsoleRunnerTest {
         private final boolean completeOnSteerFailure;
         private final boolean emitReasoningActivity;
         private boolean emitRawModelOutputActivity;
+        private boolean emitMailboxActivity;
         private final Set<TurnId> runningTurnIds = ConcurrentHashMap.newKeySet();
         private final CopyOnWriteArrayList<String> steeredInputs = new CopyOnWriteArrayList<>();
         private final CopyOnWriteArrayList<ThreadListParams> threadListCalls = new CopyOnWriteArrayList<>();
@@ -994,7 +1021,7 @@ class CodexConsoleRunnerTest {
                 initializeCalled = true;
                 return new InitializeResponse(
                         params == null || params.clientInfo() == null ? "codex-java-test" : params.clientInfo().name(),
-                        "/tmp/.codex-java",
+                        "/tmp/.d-codex",
                         "desktop",
                         "test");
             }
@@ -1427,6 +1454,19 @@ class CodexConsoleRunnerTest {
                                     "session-1",
                                     "completed",
                                     "{\"id\":\"resp-item-1\",\"summary\":\"Need to inspect README\"}",
+                                    now.plusMillis(1))));
+                }
+                if (emitMailboxActivity) {
+                    RuntimeTurn runningTurn = new RuntimeTurn(threadId, turnId, TurnStatus.RUNNING, now, null);
+                    publish(threadId, new TurnStartedNotification(runningTurn));
+                    publish(threadId, new org.dean.codex.protocol.appserver.TurnItemNotification(
+                            runningTurn,
+                            new MailboxMessageItem(
+                                    new ItemId("mailbox-1"),
+                                    new ThreadId("thread-agent"),
+                                    threadId,
+                                    MailboxDeliveryKind.CHILD_COMPLETION,
+                                    "Sub-agent worker-1 completed. Final answer:\nREADME reviewed",
                                     now.plusMillis(1))));
                 }
                 if (emitCommandExecutionNotifications) {

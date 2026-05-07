@@ -38,7 +38,7 @@ class ThreadSummaryJsonTest {
                 "gpt-5.4",
                 ThreadStatus.ACTIVE,
                 List.of(ThreadActiveFlag.WAITING_ON_APPROVAL),
-                "/tmp/.codex-java/threads/thread-1",
+                "/tmp/.d-codex/threads/thread-1",
                 "/Users/chenzhu/Git/d-codex",
                 ThreadSource.SUB_AGENT,
                 true,

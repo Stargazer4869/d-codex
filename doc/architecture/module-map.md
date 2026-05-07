@@ -65,7 +65,7 @@ experimental ----> codex-runtime-spring-ai
 - `turn/steer` is implemented cooperatively through `TurnControl`, so steering is consumed between planner steps
 - the runtime now includes a `SkillService` seam for discovering user/workspace `SKILL.md` files and resolving explicit skill references from turn input
 - planner responses can include structured `editPlan` data that is streamed before edits are applied
-- approval-required commands pause a turn and resume that same turn after `:approve` or `:reject`
+- approval-required commands pause a turn and resume that same turn after `/approve` or `/reject`
 
 ## Namespace Rules
 
