@@ -1572,6 +1572,11 @@ public class DefaultCodexRuntimeGateway implements CodexRuntimeGateway, AgentCon
         }
 
         @Override
+        public boolean hasPendingSteeringInputs() {
+            return !steeringInputs.isEmpty();
+        }
+
+        @Override
         public List<MailboxTurnMessage> drainMailboxMessages() {
             List<MailboxTurnMessage> drained = new java.util.ArrayList<>();
             MailboxTurnMessage message;

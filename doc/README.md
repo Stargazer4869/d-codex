@@ -12,6 +12,7 @@ This directory holds the working design and architecture documents for the Java 
 - [`design/natural-language-sub-agent-delegation.md`](design/natural-language-sub-agent-delegation.md) - design for natural-language delegation into sub-agents and collaboration-item parity
 - [`design/sub-agent-parent-mailbox-delivery.md`](design/sub-agent-parent-mailbox-delivery.md) - design for upstream-style child-completion delivery into the parent thread mailbox
 - [`design/cli-command-parity.md`](design/cli-command-parity.md) - tracker for top-level CLI parsing and interactive slash-command parity work
+- [`design/interactive-cli-ux-parity.md`](design/interactive-cli-ux-parity.md) - design for registry-backed slash completion and `/agent` picker parity
 - [`design/prompt-layering-parity.md`](design/prompt-layering-parity.md) - design for splitting the Java planner prompt into base instructions, developer/tool guidance, and dynamic turn context
 - [`design/responses-api-parity.md`](design/responses-api-parity.md) - tracker for bringing the Java runtime closer to the Responses API feature set that upstream Codex actually uses
 - [`design/native-responses-backend-migration.md`](design/native-responses-backend-migration.md) - follow-on design for replacing the current chat-backed model transport with a native Responses HTTP/WebSocket backend

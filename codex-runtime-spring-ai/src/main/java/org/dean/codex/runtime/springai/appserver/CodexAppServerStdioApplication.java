@@ -1,6 +1,7 @@
 package org.dean.codex.runtime.springai.appserver;
 
 import org.dean.codex.core.appserver.CodexAppServer;
+import org.dean.codex.runtime.springai.NettyRuntimeWarmup;
 import org.dean.codex.runtime.springai.appserver.transport.jsonrpc.StdioJsonRpcAppServerLauncher;
 import org.springframework.boot.Banner;
 import org.springframework.boot.SpringApplication;
@@ -16,6 +17,7 @@ public class CodexAppServerStdioApplication {
 
     public static void main(String[] args) {
         System.setProperty("org.springframework.boot.logging.LoggingSystem", "none");
+        NettyRuntimeWarmup.preloadShutdownSensitiveNettyClasses();
         PrintStream protocolStdout = System.out;
         System.setOut(new PrintStream(System.err, true, StandardCharsets.UTF_8));
 

@@ -170,12 +170,16 @@ public class DefaultToolCapabilityRegistry implements ToolCapabilityRegistry {
                     {
                       "action": "wait_agent",
                       "threadIds": ["agent-thread-id"],
-                      "timeoutMillis": 5000
+                      "timeoutMillis": 5000,
+                      "waitForAll": false,
+                      "completeWhenDone": false
                     }""",
                     defaultOutputSchema("threadIds", "timedOut", "results"),
                     false,
                     List.of(
                             "If the agent is still RUNNING after a timeout, wait again instead of reassigning the same task.",
+                            "Use waitForAll=true when the user asked you to continue only after every listed sub-agent is finished.",
+                            "Use completeWhenDone=true only when a single final delegate should be relayed directly as the parent turn's final answer.",
                             "If wait_agent returns a non-empty finalAnswer, use that result instead of waiting again.",
                             "If a MAILBOX child-completion message for that agent is already present in context, continue with that result instead of waiting again.")),
             capability("resume_agent",

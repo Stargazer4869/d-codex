@@ -46,23 +46,37 @@ What to verify:
 - the turn does not require a separate `/steer` command
 - streamed tool and item output stays visible while input is still accepted
 
-## 3. Trigger Natural-Language Sub-Agent Delegation
+## 3. Trigger Multi-Stage Sub-Agent Orchestration
 
-Ask for delegated work in plain language.
+Ask for a bounded fan-out, join, and summarizer flow in plain language.
 
 Suggested prompt:
 
 ```text
-Create a sub-agent to inspect the remaining thread-management gap versus upstream Codex and report back the top missing capabilities.
+Spawn 3 sub-agents in parallel for bounded repo research. Agent 1 should inspect doc/design/sub-agent-parent-mailbox-delivery.md and doc/design/thread-subagent-parity.md and report the top 2 remaining coordination gaps. Agent 2 should inspect doc/design/native-responses-backend-migration.md and doc/design/responses-api-parity.md and report the top 2 remaining backend gaps. Agent 3 should inspect doc/major-feature-acceptance-walkthrough.md and codex-cli/src/main/java/org/dean/codex/cli/CodexConsoleRunner.java and report the top 2 UX or walkthrough gaps. When all 3 are done, spawn a 4th sub-agent to summarize the combined findings and write them into doc/sub-agent-fanout-check.md. When the 4th sub-agent has finished, bring me the final result.
+```
+
+Suggested follow-up inspection commands while the parent is waiting:
+
+```text
+/subagents
+/threads all --source sub-agent
+/threads all --parent <thread-id-prefix>
+/resume <child-thread-id-prefix>
+/history
 ```
 
 What to verify:
 
 - the model delegates naturally without a special user command
-- collaboration activity appears in the streamed output
-- the related sub-thread shows up in `/subagents`
-- `/threads all --source sub-agent` can find the delegated work
-- `/threads all --parent <thread-id-prefix>` can narrow children of the main thread
+- three initial research sub-agents are spawned under the active parent thread
+- the parent can wait on multiple child threads and continue only after the outstanding set changes
+- each completed child produces visible collaboration and mailbox completion output
+- the parent can answer plain-language status questions such as `How are the sub-agents doing?` while work is still in flight
+- `/subagents`, `/threads all --source sub-agent`, `/threads all --parent <thread-id-prefix>`, `/resume <child-thread-id-prefix>`, and `/history` let you inspect live child progress
+- after the first three reports are complete, a fourth summarizer sub-agent is spawned automatically
+- the summarizer writes `doc/sub-agent-fanout-check.md`
+- when the summarizer finishes, the parent returns the final result without requiring a manual `/resume` into the child thread
 
 ## 4. Exercise Approvals
 

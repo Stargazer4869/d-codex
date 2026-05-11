@@ -21,6 +21,8 @@ import org.dean.codex.protocol.appserver.CommandExecParams;
 import org.dean.codex.protocol.appserver.CommandExecResizeParams;
 import org.dean.codex.protocol.appserver.CommandExecTerminateParams;
 import org.dean.codex.protocol.appserver.CommandExecWriteParams;
+import org.dean.codex.protocol.appserver.ConfigGetParams;
+import org.dean.codex.protocol.appserver.ConfigUpdateParams;
 import org.dean.codex.protocol.appserver.AgentCloseParams;
 import org.dean.codex.protocol.appserver.AgentCloseResponse;
 import org.dean.codex.protocol.appserver.AgentAssignTaskParams;
@@ -37,6 +39,7 @@ import org.dean.codex.protocol.appserver.AgentSpawnResponse;
 import org.dean.codex.protocol.appserver.InitializeParams;
 import org.dean.codex.protocol.appserver.InitializeResponse;
 import org.dean.codex.protocol.appserver.InitializedNotification;
+import org.dean.codex.protocol.appserver.ModelListParams;
 import org.dean.codex.protocol.appserver.SkillsListParams;
 import org.dean.codex.protocol.appserver.CommandExecutionCompletedNotification;
 import org.dean.codex.protocol.appserver.CommandExecutionOutputDeltaNotification;
@@ -654,6 +657,39 @@ class InProcessCodexAppServerTest {
             assertTrue(observed.stream().anyMatch(ThreadMetadataUpdatedNotification.class::isInstance));
             assertTrue(observed.stream().anyMatch(ThreadStatusChangedNotification.class::isInstance));
             assertTrue(observed.stream().anyMatch(ThreadClosedNotification.class::isInstance));
+        }
+    }
+
+    @Test
+    void modelListAndConfigUpdateExposeTuiPickerState() throws Exception {
+        CodexAppServer appServer = appServer(new NoOpTurnExecutor());
+
+        try (CodexAppServerSession session = initializedSession(appServer)) {
+            ThreadStartResponse started = session.threadStart(new ThreadStartParams("TUI state", "workspace-write", "review-sensitive"));
+            ThreadId threadId = started.thread().threadId();
+
+            var initialConfig = session.configGet(new ConfigGetParams(threadId));
+            assertEquals(threadId, initialConfig.threadId());
+            assertEquals("openai", initialConfig.modelProvider());
+            assertEquals("workspace-write", initialConfig.sandboxMode());
+            assertEquals("review-sensitive", initialConfig.approvalMode());
+
+            var models = session.modelList(new ModelListParams(threadId));
+            assertTrue(models.models().stream().anyMatch(model -> model.id().equals(initialConfig.model())));
+
+            var updated = session.configUpdate(new ConfigUpdateParams(
+                    threadId,
+                    "openai",
+                    "gpt-5.5",
+                    "read-only",
+                    "auto",
+                    "/workspace/tui"));
+
+            assertEquals("gpt-5.5", updated.config().model());
+            assertEquals("read-only", updated.config().sandboxMode());
+            assertEquals("auto", updated.config().approvalMode());
+            assertEquals("/workspace/tui", updated.config().cwd());
+            assertEquals("gpt-5.5", session.threadRead(new ThreadReadParams(threadId, false)).thread().model());
         }
     }
 

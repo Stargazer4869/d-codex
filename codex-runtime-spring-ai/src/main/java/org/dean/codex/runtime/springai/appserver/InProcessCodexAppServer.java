@@ -46,9 +46,16 @@ import org.dean.codex.protocol.appserver.CommandExecutionCompletedNotification;
 import org.dean.codex.protocol.appserver.CommandExecutionEvent;
 import org.dean.codex.protocol.appserver.CommandExecutionOutputDeltaNotification;
 import org.dean.codex.protocol.appserver.CommandExecutionTerminalInteractionNotification;
+import org.dean.codex.protocol.appserver.ConfigGetParams;
+import org.dean.codex.protocol.appserver.ConfigGetResponse;
+import org.dean.codex.protocol.appserver.ConfigUpdateParams;
+import org.dean.codex.protocol.appserver.ConfigUpdateResponse;
 import org.dean.codex.protocol.appserver.InitializeParams;
 import org.dean.codex.protocol.appserver.InitializeResponse;
 import org.dean.codex.protocol.appserver.InitializedNotification;
+import org.dean.codex.protocol.appserver.ModelListParams;
+import org.dean.codex.protocol.appserver.ModelListResponse;
+import org.dean.codex.protocol.appserver.ModelOption;
 import org.dean.codex.protocol.appserver.SkillsListParams;
 import org.dean.codex.protocol.appserver.SkillsListResponse;
 import org.dean.codex.protocol.appserver.ThreadArchiveParams;
@@ -110,6 +117,7 @@ import org.dean.codex.protocol.conversation.ThreadSummary;
 import org.dean.codex.protocol.runtime.RuntimeNotification;
 import org.dean.codex.protocol.runtime.RuntimeNotificationType;
 import org.dean.codex.protocol.context.ReconstructedThreadContext;
+import org.dean.codex.runtime.springai.config.CodexProperties;
 import org.dean.codex.runtime.springai.thread.DefaultThreadCatalogService;
 import org.dean.codex.runtime.springai.thread.ThreadCatalogService;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -119,6 +127,7 @@ import org.springframework.stereotype.Component;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.LinkedHashSet;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -139,6 +148,7 @@ public class InProcessCodexAppServer implements CodexAppServer {
     private final ExecSessionManager execSessionManager;
     private final ThreadCatalogService threadCatalogService;
     private final Path codexHome;
+    private final CodexProperties codexProperties;
     private final Map<ThreadId, List<BackgroundTerminalRef>> backgroundTerminals = new ConcurrentHashMap<>();
 
     @Autowired
@@ -146,12 +156,22 @@ public class InProcessCodexAppServer implements CodexAppServer {
                                    ShellCommandTool shellCommandTool,
                                    ExecSessionManager execSessionManager,
                                    ThreadCatalogService threadCatalogService,
-                                   @Qualifier("codexStorageRoot") Path codexHome) {
+                                   @Qualifier("codexStorageRoot") Path codexHome,
+                                   CodexProperties codexProperties) {
         this.runtimeGateway = runtimeGateway;
         this.shellCommandTool = shellCommandTool;
         this.execSessionManager = execSessionManager;
         this.threadCatalogService = threadCatalogService == null ? new DefaultThreadCatalogService() : threadCatalogService;
         this.codexHome = normalizeCodexHome(codexHome);
+        this.codexProperties = codexProperties == null ? new CodexProperties() : codexProperties;
+    }
+
+    public InProcessCodexAppServer(CodexRuntimeGateway runtimeGateway,
+                                   ShellCommandTool shellCommandTool,
+                                   ExecSessionManager execSessionManager,
+                                   ThreadCatalogService threadCatalogService,
+                                   Path codexHome) {
+        this(runtimeGateway, shellCommandTool, execSessionManager, threadCatalogService, codexHome, new CodexProperties());
     }
 
     public InProcessCodexAppServer(CodexRuntimeGateway runtimeGateway) {
@@ -410,11 +430,11 @@ public class InProcessCodexAppServer implements CodexAppServer {
             ThreadSummary updated = applyMetadataUpdate(
                     current,
                     threadId,
-                    params.cwd(),
-                    params.modelProvider(),
-                    params.model(),
-                    params.sandboxMode(),
-                    params.approvalMode(),
+                    params == null ? null : params.cwd(),
+                    params == null ? null : params.modelProvider(),
+                    params == null ? null : params.model(),
+                    params == null ? null : params.sandboxMode(),
+                    params == null ? null : params.approvalMode(),
                     params.gitSha(),
                     params.gitBranch(),
                     params.gitOriginUrl(),
@@ -709,6 +729,78 @@ public class InProcessCodexAppServer implements CodexAppServer {
         }
 
         @Override
+        public ModelListResponse modelList(ModelListParams params) {
+            ensureReady();
+            ConfigGetResponse config = configGet(new ConfigGetParams(params == null ? null : params.threadId()));
+            String currentModel = firstNonBlank(config.model(), defaultModel());
+            String currentProvider = firstNonBlank(config.modelProvider(), "openai");
+            LinkedHashSet<String> modelIds = new LinkedHashSet<>();
+            modelIds.add(currentModel);
+            modelIds.add(defaultModel());
+            modelIds.add("gpt-5.5");
+            modelIds.add("gpt-5.4");
+            modelIds.add("gpt-5.4-mini");
+            modelIds.add("gpt-5.3-codex");
+            modelIds.add("gpt-5.3-codex-spark-preview");
+            List<String> reasoningEfforts = List.of("low", "medium", "high", "xhigh");
+            return new ModelListResponse(modelIds.stream()
+                    .filter(model -> model != null && !model.isBlank())
+                    .map(model -> new ModelOption(
+                            model,
+                            model,
+                            currentProvider,
+                            model.equals(currentModel),
+                            model.equals(defaultModel()),
+                            reasoningEfforts))
+                    .toList());
+        }
+
+        @Override
+        public ConfigGetResponse configGet(ConfigGetParams params) {
+            ensureReady();
+            ThreadSummary thread = params == null || params.threadId() == null
+                    ? firstLoadedThread()
+                    : runtimeGateway.listThreads().stream()
+                    .filter(summary -> summary.threadId().equals(params.threadId()))
+                    .findFirst()
+                    .orElse(null);
+            return configResponse(thread);
+        }
+
+        @Override
+        public ConfigUpdateResponse configUpdate(ConfigUpdateParams params) {
+            ensureReady();
+            ThreadId threadId = params == null ? null : params.threadId();
+            if (threadId == null) {
+                ThreadSummary firstLoaded = firstLoadedThread();
+                if (firstLoaded == null) {
+                    throw new IllegalArgumentException("threadId is required");
+                }
+                threadId = firstLoaded.threadId();
+            }
+            ThreadId targetThreadId = threadId;
+            ThreadSummary current = runtimeGateway.listThreads().stream()
+                    .filter(thread -> thread.threadId().equals(targetThreadId))
+                    .findFirst()
+                    .orElse(null);
+            ThreadSummary updated = applyMetadataUpdate(
+                    current,
+                    targetThreadId,
+                    params == null ? null : params.cwd(),
+                    params == null ? null : params.modelProvider(),
+                    params == null ? null : params.model(),
+                    params == null ? null : params.sandboxMode(),
+                    params == null ? null : params.approvalMode(),
+                    null,
+                    null,
+                    null,
+                    currentClientVersion(),
+                    null);
+            publish(new ThreadMetadataUpdatedNotification(updated));
+            return new ConfigUpdateResponse(configResponse(updated), updated);
+        }
+
+        @Override
         public AutoCloseable subscribe(Consumer<AppServerNotification> listener) {
             ensureReady();
             subscribers.add(listener);
@@ -986,6 +1078,36 @@ public class InProcessCodexAppServer implements CodexAppServer {
 
         private ThreadSource currentThreadSource() {
             return isCliClient() ? ThreadSource.CLI : ThreadSource.APP_SERVER;
+        }
+
+        private ThreadSummary firstLoadedThread() {
+            return runtimeGateway.listThreads().stream()
+                    .filter(ThreadSummary::loaded)
+                    .findFirst()
+                    .orElseGet(() -> runtimeGateway.listThreads().stream().findFirst().orElse(null));
+        }
+
+        private ConfigGetResponse configResponse(ThreadSummary thread) {
+            String defaultApproval = codexProperties.getShell() == null
+                    ? "review-sensitive"
+                    : firstNonBlank(codexProperties.getShell().getApprovalMode(), "review-sensitive");
+            return new ConfigGetResponse(
+                    thread == null ? null : thread.threadId(),
+                    firstNonBlank(thread == null ? null : thread.modelProvider(), "openai"),
+                    firstNonBlank(thread == null ? null : thread.model(), defaultModel()),
+                    thread == null ? null : thread.sandboxMode(),
+                    firstNonBlank(thread == null ? null : thread.approvalMode(), defaultApproval),
+                    firstNonBlank(thread == null ? null : thread.cwd(), System.getProperty("user.dir", "")),
+                    List.of("tui", "slash-palette", "selection-overlays"));
+        }
+
+        private String defaultModel() {
+            return firstNonBlank(System.getenv("CODEX_CHAT_MODEL"), "gpt-5.4");
+        }
+
+        private String firstNonBlank(String value, String fallback) {
+            String normalized = value == null ? "" : value.trim();
+            return normalized.isEmpty() ? fallback : normalized;
         }
 
         private boolean isCliClient() {

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.LongNode;
 import org.dean.codex.core.appserver.CodexAppServerSession;
+import org.dean.codex.protocol.appserver.AgentMailboxUpdatedNotification;
 import org.dean.codex.protocol.appserver.AppServerNotification;
 import org.dean.codex.protocol.appserver.CommandExecParams;
 import org.dean.codex.protocol.appserver.CommandExecResizeParams;
@@ -15,6 +16,10 @@ import org.dean.codex.protocol.appserver.CommandExecWriteParams;
 import org.dean.codex.protocol.appserver.CommandExecutionCompletedNotification;
 import org.dean.codex.protocol.appserver.CommandExecutionOutputDeltaNotification;
 import org.dean.codex.protocol.appserver.CommandExecutionTerminalInteractionNotification;
+import org.dean.codex.protocol.appserver.ConfigGetParams;
+import org.dean.codex.protocol.appserver.ConfigGetResponse;
+import org.dean.codex.protocol.appserver.ConfigUpdateParams;
+import org.dean.codex.protocol.appserver.ConfigUpdateResponse;
 import org.dean.codex.protocol.appserver.InitializeParams;
 import org.dean.codex.protocol.appserver.InitializeResponse;
 import org.dean.codex.protocol.appserver.InitializedNotification;
@@ -34,6 +39,8 @@ import org.dean.codex.protocol.appserver.AgentSpawnParams;
 import org.dean.codex.protocol.appserver.AgentSpawnResponse;
 import org.dean.codex.protocol.appserver.AgentWaitParams;
 import org.dean.codex.protocol.appserver.AgentWaitResponse;
+import org.dean.codex.protocol.appserver.ModelListParams;
+import org.dean.codex.protocol.appserver.ModelListResponse;
 import org.dean.codex.protocol.appserver.SkillsListParams;
 import org.dean.codex.protocol.appserver.SkillsListResponse;
 import org.dean.codex.protocol.appserver.ThreadArchiveParams;
@@ -68,6 +75,7 @@ import org.dean.codex.protocol.appserver.ThreadStartResponse;
 import org.dean.codex.protocol.appserver.ThreadShellCommandParams;
 import org.dean.codex.protocol.appserver.ThreadShellCommandResponse;
 import org.dean.codex.protocol.appserver.ThreadStartedNotification;
+import org.dean.codex.protocol.appserver.ThreadStatusChangedNotification;
 import org.dean.codex.protocol.appserver.ThreadUnarchiveParams;
 import org.dean.codex.protocol.appserver.ThreadUnarchiveResponse;
 import org.dean.codex.protocol.appserver.ThreadUnsubscribeParams;
@@ -122,8 +130,10 @@ public class JsonRpcCodexAppServerSession implements CodexAppServerSession {
             Map.entry("thread/closed", ThreadClosedNotification.class),
             Map.entry("thread/name/updated", ThreadNameUpdatedNotification.class),
             Map.entry("thread/metadata/updated", ThreadMetadataUpdatedNotification.class),
+            Map.entry("thread/status/changed", ThreadStatusChangedNotification.class),
             Map.entry("thread/compaction/started", ThreadCompactionStartedNotification.class),
             Map.entry("thread/compacted", ThreadCompactedNotification.class),
+            Map.entry("agent/mailbox/updated", AgentMailboxUpdatedNotification.class),
             Map.entry("item/commandExecution/outputDelta", CommandExecutionOutputDeltaNotification.class),
             Map.entry("item/commandExecution/terminalInteraction", CommandExecutionTerminalInteractionNotification.class),
             Map.entry("item/commandExecution/completed", CommandExecutionCompletedNotification.class),
@@ -360,6 +370,21 @@ public class JsonRpcCodexAppServerSession implements CodexAppServerSession {
     @Override
     public SkillsListResponse skillsList(SkillsListParams params) {
         return request("skills/list", params, SkillsListResponse.class);
+    }
+
+    @Override
+    public ModelListResponse modelList(ModelListParams params) {
+        return request("model/list", params, ModelListResponse.class);
+    }
+
+    @Override
+    public ConfigGetResponse configGet(ConfigGetParams params) {
+        return request("config/get", params, ConfigGetResponse.class);
+    }
+
+    @Override
+    public ConfigUpdateResponse configUpdate(ConfigUpdateParams params) {
+        return request("config/update", params, ConfigUpdateResponse.class);
     }
 
     @Override

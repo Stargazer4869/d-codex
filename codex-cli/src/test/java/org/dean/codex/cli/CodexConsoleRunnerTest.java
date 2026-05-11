@@ -629,6 +629,19 @@ class CodexConsoleRunnerTest {
     }
 
     @Test
+    void bareAgentCommandPrintsPickerChoicesWithoutRichTerminal() throws Exception {
+        StubAppServer runtime = new StubAppServer();
+        CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());
+
+        String console = captureConsole(() -> assertTrue(runner.handleConsoleCommand("/agent")));
+
+        assertTrue(console.contains("Agents in current thread tree:"));
+        assertTrue(console.contains("Main [default]"));
+        assertTrue(console.contains("worker [explorer]"));
+        assertTrue(console.contains("Run /agent use <thread-id-prefix> to switch."));
+    }
+
+    @Test
     void topLevelResumeCommandSelectsRequestedThreadBeforeInteractiveLoop() throws Exception {
         StubAppServer runtime = new StubAppServer();
         CodexConsoleRunner runner = new CodexConsoleRunner(runtime, new StubApprovalService());

@@ -24,9 +24,15 @@ import org.dean.codex.protocol.appserver.CommandExecResponse;
 import org.dean.codex.protocol.appserver.CommandExecTerminateParams;
 import org.dean.codex.protocol.appserver.CommandExecTerminateResponse;
 import org.dean.codex.protocol.appserver.CommandExecWriteParams;
+import org.dean.codex.protocol.appserver.ConfigGetParams;
+import org.dean.codex.protocol.appserver.ConfigGetResponse;
+import org.dean.codex.protocol.appserver.ConfigUpdateParams;
+import org.dean.codex.protocol.appserver.ConfigUpdateResponse;
 import org.dean.codex.protocol.appserver.InitializedNotification;
 import org.dean.codex.protocol.appserver.InitializeParams;
 import org.dean.codex.protocol.appserver.InitializeResponse;
+import org.dean.codex.protocol.appserver.ModelListParams;
+import org.dean.codex.protocol.appserver.ModelListResponse;
 import org.dean.codex.protocol.appserver.SkillsListParams;
 import org.dean.codex.protocol.appserver.SkillsListResponse;
 import org.dean.codex.protocol.appserver.ThreadArchiveParams;
@@ -151,6 +157,18 @@ public interface CodexAppServerSession extends AutoCloseable {
     TurnSteerResponse turnSteer(TurnSteerParams params);
 
     SkillsListResponse skillsList(SkillsListParams params);
+
+    default ModelListResponse modelList(ModelListParams params) {
+        throw new UnsupportedOperationException("model/list is not supported");
+    }
+
+    default ConfigGetResponse configGet(ConfigGetParams params) {
+        throw new UnsupportedOperationException("config/get is not supported");
+    }
+
+    default ConfigUpdateResponse configUpdate(ConfigUpdateParams params) {
+        throw new UnsupportedOperationException("config/update is not supported");
+    }
 
     AutoCloseable subscribe(Consumer<AppServerNotification> listener);
 }

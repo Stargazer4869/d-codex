@@ -14,6 +14,9 @@ codex:
   storage-root: ${CODEX_STORAGE_ROOT:${CODEX_HOME:${user.home}/.d-codex}}
   cli:
     show-tool-activity: ${CODEX_SHOW_TOOL_ACTIVITY:true}
+    tui:
+      enabled: ${CODEX_TUI_ENABLED:true}
+      force: ${CODEX_TUI_FORCE:false}
     diagnostics:
       enabled: ${CODEX_CLI_DIAGNOSTICS_ENABLED:true}
       directory: ${CODEX_CLI_DIAGNOSTICS_DIRECTORY:${codex.storage-root}/logs}

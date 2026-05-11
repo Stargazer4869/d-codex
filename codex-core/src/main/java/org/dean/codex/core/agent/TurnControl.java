@@ -12,6 +12,10 @@ public interface TurnControl {
         return List.of();
     }
 
+    default boolean hasPendingSteeringInputs() {
+        return false;
+    }
+
     default List<MailboxTurnMessage> drainMailboxMessages() {
         return List.of();
     }

@@ -1,6 +1,7 @@
 package org.dean.codex.cli.launch;
 
 import org.dean.codex.cli.CodexCliApplication;
+import org.dean.codex.runtime.springai.NettyRuntimeWarmup;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.context.ConfigurableApplicationContext;
@@ -16,6 +17,7 @@ final class SpringBootCliApplicationStartup implements CliApplicationStartup {
 
     @Override
     public void start(CliLaunchRequest request) {
+        NettyRuntimeWarmup.preloadShutdownSensitiveNettyClasses();
         SpringApplication application = new SpringApplication(applicationClass);
         application.setWebApplicationType(WebApplicationType.NONE);
         try (ConfigurableApplicationContext ignored = application.run(request.toArray())) {

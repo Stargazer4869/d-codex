@@ -22,11 +22,14 @@ import org.dean.codex.cli.config.CliConfigOverrides;
 import org.dean.codex.cli.config.CliConfigOverridesMapper;
 import org.dean.codex.cli.config.CliApprovalMode;
 import org.dean.codex.cli.config.CliSandboxMode;
+import org.dean.codex.cli.interactive.AgentPickerEntry;
+import org.dean.codex.cli.interactive.JLineConsoleSupport;
 import org.dean.codex.cli.interactive.SlashCommandParseResult;
 import org.dean.codex.cli.interactive.SlashCommandParser;
 import org.dean.codex.cli.interactive.SlashCommandRegistry;
 import org.dean.codex.cli.interactive.SlashCommandSpec;
 import org.dean.codex.cli.launch.CliLaunchRequest;
+import org.dean.codex.cli.tui.CodexTuiRunner;
 import org.dean.codex.protocol.appserver.AppServerCapabilities;
 import org.dean.codex.protocol.appserver.AppServerClientInfo;
 import org.dean.codex.protocol.appserver.AppServerNotification;
@@ -103,6 +106,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.stereotype.Component;
 
+import java.io.IOException;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -118,6 +122,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
@@ -140,8 +145,13 @@ public class CodexConsoleRunner implements CommandLineRunner {
     private ThreadId activeThreadId;
     private int threadSequence = 1;
     private CliLaunchRequest currentLaunchRequest = CliLaunchRequest.of();
+    private volatile JLineConsoleSupport richConsoleSupport;
     @Value("${codex.cli.show-tool-activity:true}")
     private boolean showToolActivity = true;
+    @Value("${codex.cli.tui.enabled:true}")
+    private boolean tuiEnabled = true;
+    @Value("${codex.cli.tui.force:false}")
+    private boolean tuiForce = false;
 
     @Autowired
     public CodexConsoleRunner(CodexAppServer codexAppServer,
@@ -172,6 +182,14 @@ public class CodexConsoleRunner implements CommandLineRunner {
 
     private void runInteractiveLoop(String initialPrompt, boolean preferFreshPromptOnStart) {
         ensureActiveThreadSelected();
+        if (tuiEnabled && (tuiForce || CodexTuiRunner.interactiveTerminalAvailable())) {
+            activeThreadId = new CodexTuiRunner(
+                    appServerSession,
+                    commandApprovalService,
+                    currentLaunchRequest,
+                    activeThreadId).run(initialPrompt, preferFreshPromptOnStart);
+            return;
+        }
         try (InteractiveConsoleLoop interactiveLoop = new InteractiveConsoleLoop()) {
             System.out.printf("Codex CLI. Active thread: %s%n", shortThreadId(activeThreadId));
             printHelp();
@@ -1554,7 +1572,7 @@ public class CodexConsoleRunner implements CommandLineRunner {
     private void handleAgentCommand(String arguments) {
         String remainder = arguments == null ? "" : arguments.trim();
         if (remainder.isEmpty()) {
-            System.out.println("Usage: /agent <tree|use> ...");
+            handleAgentPicker();
             return;
         }
         String[] parts = remainder.split("\\s+", 2);
@@ -1571,6 +1589,127 @@ public class CodexConsoleRunner implements CommandLineRunner {
             }
             default -> System.out.println("Usage: /agent <tree|use> ...");
         }
+    }
+
+    private void handleAgentPicker() {
+        List<AgentPickerEntry> entries = buildAgentPickerEntries();
+        if (entries.isEmpty()) {
+            System.out.println("No related sub-agent threads for " + shortThreadId(activeThreadId) + ".");
+            return;
+        }
+
+        JLineConsoleSupport support = richConsoleSupport;
+        if (support != null) {
+            try {
+                Optional<AgentPickerEntry> selected = support.chooseAgent(entries);
+                selected.ifPresent(entry -> switchActiveThread(entry.threadId().value()));
+                return;
+            }
+            catch (IOException exception) {
+                logger.debug("interactive agent picker failed; falling back to line-oriented output", exception);
+            }
+        }
+
+        printAgentPickerFallback(entries);
+    }
+
+    private List<AgentPickerEntry> buildAgentPickerEntries() {
+        ThreadReadResponse response = appServerSession.threadRead(new ThreadReadParams(activeThreadId, false));
+        List<ThreadSummary> threadTree = new ArrayList<>();
+        threadTree.add(response.thread());
+        threadTree.addAll(response.relatedThreads());
+        if (threadTree.size() == 1 && response.thread().parentThreadId() == null) {
+            return List.of();
+        }
+
+        Map<ThreadId, ThreadSummary> threadsById = new LinkedHashMap<>();
+        for (ThreadSummary thread : threadTree) {
+            threadsById.put(thread.threadId(), thread);
+        }
+        Map<ThreadId, List<ThreadSummary>> childrenByParent = new LinkedHashMap<>();
+        for (ThreadSummary thread : threadTree) {
+            if (thread.parentThreadId() != null) {
+                childrenByParent.computeIfAbsent(thread.parentThreadId(), ignored -> new ArrayList<>()).add(thread);
+            }
+        }
+
+        ThreadId rootThreadId = response.treeRootThreadId() == null ? response.thread().threadId() : response.treeRootThreadId();
+        ThreadSummary root = threadsById.getOrDefault(rootThreadId, response.thread());
+        List<AgentPickerEntry> entries = new ArrayList<>();
+        appendAgentPickerEntries(root, childrenByParent, entries, root.threadId());
+        return List.copyOf(entries);
+    }
+
+    private void appendAgentPickerEntries(ThreadSummary thread,
+                                          Map<ThreadId, List<ThreadSummary>> childrenByParent,
+                                          List<AgentPickerEntry> entries,
+                                          ThreadId rootThreadId) {
+        boolean root = thread.threadId().equals(rootThreadId);
+        entries.add(new AgentPickerEntry(
+                thread.threadId(),
+                agentPickerLabel(thread, root),
+                agentPickerDescription(thread, root),
+                thread.threadId().equals(activeThreadId),
+                agentPickerClosed(thread)));
+        for (ThreadSummary child : childrenByParent.getOrDefault(thread.threadId(), List.of())) {
+            appendAgentPickerEntries(child, childrenByParent, entries, rootThreadId);
+        }
+    }
+
+    private String agentPickerLabel(ThreadSummary thread, boolean root) {
+        if (root) {
+            return "Main [default]";
+        }
+        String nickname = blankToNull(thread.agentNickname());
+        String role = blankToNull(thread.agentRole());
+        if (nickname != null && role != null) {
+            return nickname + " [" + role + "]";
+        }
+        if (nickname != null) {
+            return nickname;
+        }
+        if (role != null) {
+            return "[" + role + "]";
+        }
+        String title = blankToNull(thread.title());
+        return title == null ? "Agent" : title;
+    }
+
+    private String agentPickerDescription(ThreadSummary thread, boolean root) {
+        List<String> details = new ArrayList<>();
+        details.add(shortThreadId(thread.threadId()));
+        if (!root && thread.title() != null && !thread.title().isBlank()) {
+            details.add(thread.title());
+        }
+        details.add(formatEnum(thread.status()));
+        if (thread.agentStatus() != null) {
+            details.add("agent=" + formatEnum(thread.agentStatus()));
+        }
+        if (thread.archived()) {
+            details.add("archived");
+        }
+        return String.join("  ", details);
+    }
+
+    private boolean agentPickerClosed(ThreadSummary thread) {
+        return thread.agentClosedAt() != null
+                || (thread.agentStatus() != null && "SHUTDOWN".equals(thread.agentStatus().name()));
+    }
+
+    private void printAgentPickerFallback(List<AgentPickerEntry> entries) {
+        System.out.println("Agents in current thread tree:");
+        for (int index = 0; index < entries.size(); index++) {
+            AgentPickerEntry entry = entries.get(index);
+            String marker = entry.current() ? "*" : " ";
+            String state = entry.closed() ? "closed" : "open";
+            System.out.printf("%s %d. %-24s %s  [%s]%n",
+                    marker,
+                    index + 1,
+                    entry.label(),
+                    entry.description(),
+                    state);
+        }
+        System.out.println("Run /agent use <thread-id-prefix> to switch.");
     }
 
     private List<ThreadSummary> fetchThreads(Boolean archived) {
@@ -1730,8 +1869,11 @@ public class CodexConsoleRunner implements CommandLineRunner {
         private final AutoCloseable subscription;
         private final Thread inputThread;
         private final AtomicBoolean inputClosed = new AtomicBoolean(false);
+        private final CountDownLatch inputReady = new CountDownLatch(1);
+        private final Semaphore inputHandled = new Semaphore(0);
         private volatile boolean exitRequested;
         private volatile boolean preferFreshPromptOnStart;
+        private volatile boolean inputOwnsPrompt;
         private ThreadId activeTurnThreadId;
         private TurnId activeTurnId;
 
@@ -1745,6 +1887,7 @@ public class CodexConsoleRunner implements CommandLineRunner {
             this.preferFreshPromptOnStart = preferFreshPromptOnStart;
             syncActiveTurnFromRuntime();
             inputThread.start();
+            awaitInputReady();
             if (initialPrompt != null && !initialPrompt.isBlank()) {
                 submitPlainInput(initialPrompt.trim());
             }
@@ -1762,7 +1905,12 @@ public class CodexConsoleRunner implements CommandLineRunner {
                     if (input == null) {
                         continue;
                     }
-                    handleUserInput(input);
+                    try {
+                        handleUserInput(input);
+                    }
+                    finally {
+                        inputHandled.release();
+                    }
                     if (!exitRequested) {
                         printPrompt();
                     }
@@ -1781,16 +1929,65 @@ public class CodexConsoleRunner implements CommandLineRunner {
         }
 
         private void readInputLoop() {
+            if (JLineConsoleSupport.richInputPossible()) {
+                try (JLineConsoleSupport support = JLineConsoleSupport.open(CONSOLE_COMMAND_REGISTRY)) {
+                    richConsoleSupport = support;
+                    inputOwnsPrompt = true;
+                    inputReady.countDown();
+                    while (!exitRequested) {
+                        String line = support.readLine();
+                        if (line == null) {
+                            break;
+                        }
+                        userInputs.put(line);
+                        waitForInputHandled();
+                    }
+                    return;
+                }
+                catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                catch (Exception exception) {
+                    logger.debug("rich terminal input unavailable; falling back to scanner input", exception);
+                    richConsoleSupport = null;
+                    inputOwnsPrompt = false;
+                    inputReady.countDown();
+                }
+            }
+
+            inputOwnsPrompt = false;
+            inputReady.countDown();
             try (Scanner scanner = new Scanner(System.in)) {
                 while (!exitRequested && scanner.hasNextLine()) {
                     userInputs.put(scanner.nextLine());
+                    waitForInputHandled();
                 }
             }
             catch (InterruptedException exception) {
                 Thread.currentThread().interrupt();
             }
             finally {
+                richConsoleSupport = null;
                 inputClosed.set(true);
+            }
+        }
+
+        private void awaitInputReady() {
+            try {
+                inputReady.await(1, TimeUnit.SECONDS);
+            }
+            catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        private void waitForInputHandled() {
+            try {
+                inputHandled.acquire();
+            }
+            catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
             }
         }
 
@@ -2108,7 +2305,7 @@ public class CodexConsoleRunner implements CommandLineRunner {
         }
 
         private void printPrompt() {
-            if (!exitRequested) {
+            if (!exitRequested && !inputOwnsPrompt) {
                 System.out.print("> ");
                 System.out.flush();
             }
@@ -2123,6 +2320,7 @@ public class CodexConsoleRunner implements CommandLineRunner {
                 logger.debug("interactive console subscription close failed", exception);
             }
             inputThread.interrupt();
+            inputHandled.release();
             try {
                 inputThread.join(1000);
             }

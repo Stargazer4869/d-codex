@@ -591,6 +591,18 @@ public class SpringAiCodexAgent implements CodexAgent {
                         List.copyOf(items),
                         approvalMessage);
             }
+            if (batchOutcome != null
+                    && batchOutcome.terminalFinalAnswer() != null
+                    && !batchOutcome.terminalFinalAnswer().isBlank()) {
+                String finalAnswer = batchOutcome.terminalFinalAnswer();
+                if (!assistantTextAlreadyStreamed(finalAnswer)) {
+                    emitItem(items, itemConsumer, agentMessageItem(finalAnswer));
+                }
+                return new ExecutionOutcome(
+                        TurnStatus.COMPLETED,
+                        List.copyOf(items),
+                        finalAnswer);
+            }
             if (turnControl.interruptionRequested()) {
                 return interruptedOutcome(items, itemConsumer);
             }
@@ -1037,6 +1049,7 @@ public class SpringAiCodexAgent implements CodexAgent {
         List<String> approvalIds = new ArrayList<>();
         List<ExecSessionObservation> execSessionObservations = new ArrayList<>();
         boolean awaitingApproval = false;
+        String terminalFinalAnswer = null;
         for (int index = 0; index < actions.size(); ) {
             ToolActionRequest action = actions.get(index);
             if (isParallelSafe(action.action())) {
@@ -1077,6 +1090,10 @@ public class SpringAiCodexAgent implements CodexAgent {
             if (actionOutcome.execSessionObservation() != null) {
                 execSessionObservations.add(actionOutcome.execSessionObservation());
             }
+            if (actionOutcome.terminalFinalAnswer() != null && !actionOutcome.terminalFinalAnswer().isBlank()) {
+                terminalFinalAnswer = actionOutcome.terminalFinalAnswer();
+                break;
+            }
             if (actionOutcome.awaitingApproval()) {
                 awaitingApproval = true;
                 break;
@@ -1089,14 +1106,16 @@ public class SpringAiCodexAgent implements CodexAgent {
                     objectMapper.writeValueAsString(Map.of("results", results)),
                     awaitingApproval,
                     List.copyOf(approvalIds),
-                    List.copyOf(execSessionObservations));
+                    List.copyOf(execSessionObservations),
+                    terminalFinalAnswer);
         }
         catch (Exception exception) {
             return new BatchExecutionOutcome(
                     createErrorObservation(exception.getMessage()),
                     awaitingApproval,
                     List.copyOf(approvalIds),
-                    List.copyOf(execSessionObservations));
+                    List.copyOf(execSessionObservations),
+                    terminalFinalAnswer);
         }
     }
 
@@ -1182,6 +1201,7 @@ public class SpringAiCodexAgent implements CodexAgent {
                     describeTarget(action));
         }
         String observation;
+        final String[] terminalFinalAnswerHolder = new String[1];
         ThreadId collabNewThreadId = null;
         List<ThreadId> collabReceiverThreadIds = List.of();
         Map<String, AgentStatus> collabAgentStatuses = Map.of();
@@ -1239,6 +1259,12 @@ public class SpringAiCodexAgent implements CodexAgent {
                 case SEND_MESSAGE -> {
                     AgentControl agentControl = requireAgentControl();
                     ThreadId agentThreadId = resolveAgentThreadId(agentControl, threadId, action.threadId());
+                    if (isCurrentThreadAgentTarget(threadId, agentThreadId)) {
+                        yield selfTargetCollaborationObservation(
+                                "send_message",
+                                threadId,
+                                "A sub-agent cannot send a message to its own thread. Continue the delegated work locally instead of messaging yourself.");
+                    }
                     AgentSummary agentSummary = agentControl.sendMessage(
                             agentThreadId,
                             new AgentMessage(threadId, agentThreadId, action.content(), Instant.now()));
@@ -1259,6 +1285,12 @@ public class SpringAiCodexAgent implements CodexAgent {
                 case ASSIGN_TASK, SEND_INPUT -> {
                     AgentControl agentControl = requireAgentControl();
                     ThreadId agentThreadId = resolveAgentThreadId(agentControl, threadId, action.threadId());
+                    if (isCurrentThreadAgentTarget(threadId, agentThreadId)) {
+                        yield selfTargetCollaborationObservation(
+                                action.action() == ToolAction.SEND_INPUT ? "send_input" : "assign_task",
+                                threadId,
+                                "A sub-agent cannot reassign work to its own thread. Continue the delegated work locally instead of targeting yourself.");
+                    }
                     AgentSummary currentAgent = currentAgentSummary(agentControl, agentThreadId);
                     if (!action.interrupt() && currentAgent != null && isAgentAlreadyWorking(currentAgent.status())) {
                         yield collaborationGuardObservation(
@@ -1289,35 +1321,55 @@ public class SpringAiCodexAgent implements CodexAgent {
                 case WAIT_AGENT -> {
                     AgentControl agentControl = requireAgentControl();
                     List<ThreadId> waitTargets = resolveAgentThreadIds(agentControl, threadId, action.threadIds());
+                    if (waitTargets.stream().anyMatch(waitTarget -> isCurrentThreadAgentTarget(threadId, waitTarget))) {
+                        yield selfTargetCollaborationObservation(
+                                "wait_agent",
+                                threadId,
+                                "A sub-agent cannot wait on its own thread. Continue the delegated work locally or inspect child agents instead.");
+                    }
                     long timeoutMillis = effectiveWaitAgentTimeoutMillis(action.timeoutMillis());
-                    AgentWaitResult waitResult = waitForAgentResult(
+                    AggregatedAgentWaitResult aggregatedWaitResult = waitForAgentResults(
                             agentControl,
                             waitTargets,
                             timeoutMillis,
-                            turnControl);
+                            turnControl,
+                            action.waitForAll());
+                    AgentWaitResult waitResult = aggregatedWaitResult.primaryResult();
                     LinkedHashMap<String, Object> response = new LinkedHashMap<>();
                     response.put("success", true);
                     response.put("action", "wait_agent");
-                    response.put("threadId", waitResult.threadId() == null ? null : waitResult.threadId().value());
-                    response.put("turnId", waitResult.turnId() == null ? null : waitResult.turnId().value());
-                    response.put("previousStatus", waitResult.previousStatus());
-                    response.put("status", waitResult.status());
-                    response.put("timedOut", waitResult.timedOut());
-                    response.put("message", waitResult.message());
-                    response.put("finalAnswer", waitResult.finalAnswer());
-                    response.put("completedAt", waitResult.completedAt());
+                    response.put("threadId", waitResult == null || waitResult.threadId() == null ? null : waitResult.threadId().value());
+                    response.put("turnId", waitResult == null || waitResult.turnId() == null ? null : waitResult.turnId().value());
+                    response.put("previousStatus", waitResult == null ? null : waitResult.previousStatus());
+                    response.put("status", waitResult == null ? null : waitResult.status());
+                    response.put("timedOut", aggregatedWaitResult.timedOut());
+                    response.put("message", aggregatedWaitResult.message());
+                    response.put("finalAnswer", aggregatedWaitResult.finalAnswer());
+                    response.put("completedAt", waitResult == null ? null : waitResult.completedAt());
                     response.put("result", waitResult);
                     response.put("threadIds", waitTargets.stream().map(ThreadId::value).toList());
                     response.put("timeoutMillis", timeoutMillis);
-                    response.put("agentStillRunning", isAgentAlreadyWorking(waitResult.status()));
-                    response.put("shouldWaitAgain", waitResult.timedOut() && isAgentAlreadyWorking(waitResult.status()));
-                    response.put("shouldUseFinalAnswer", hasUsableAgentFinalAnswer(waitResult));
-                    response.put("recommendedNextAction", recommendedWaitAgentNextAction(waitResult));
-                    List<ThreadId> effectiveWaitTargets = waitTargets.isEmpty() && waitResult.threadId() != null
+                    response.put("waitForAll", action.waitForAll());
+                    response.put("completeWhenDone", action.completeWhenDone());
+                    response.put("allCompleted", aggregatedWaitResult.allCompleted());
+                    response.put("completedThreadIds", aggregatedWaitResult.completedResults().stream()
+                            .map(CompletedAgentResult::threadId)
+                            .filter(java.util.Objects::nonNull)
+                            .map(ThreadId::value)
+                            .toList());
+                    response.put("pendingThreadIds", aggregatedWaitResult.pendingThreadIds().stream().map(ThreadId::value).toList());
+                    response.put("completedResults", aggregatedWaitResult.completedResults().stream()
+                            .map(this::serializeCompletedAgentResult)
+                            .toList());
+                    response.put("agentStillRunning", !aggregatedWaitResult.pendingThreadIds().isEmpty());
+                    response.put("shouldWaitAgain", shouldWaitAgainAfterAggregatedResult(aggregatedWaitResult));
+                    response.put("shouldUseFinalAnswer", shouldUseFinalAnswerAfterAggregatedResult(aggregatedWaitResult));
+                    response.put("recommendedNextAction", recommendedWaitAgentNextAction(aggregatedWaitResult));
+                    List<ThreadId> effectiveWaitTargets = waitTargets.isEmpty() && waitResult != null && waitResult.threadId() != null
                             ? List.of(waitResult.threadId())
                             : waitTargets;
                     collabReceiverThreadIds = List.copyOf(effectiveWaitTargets);
-                    if (waitResult.threadId() != null && waitResult.status() != null) {
+                    if (waitResult != null && waitResult.threadId() != null && waitResult.status() != null) {
                         collabAgentStatuses = Map.of(waitResult.threadId().value(), waitResult.status());
                     }
                     LinkedHashMap<String, AgentMailboxState> waitMailboxes = new LinkedHashMap<>();
@@ -1331,13 +1383,20 @@ public class SpringAiCodexAgent implements CodexAgent {
                         }
                     }
                     collabMailboxes = waitMailboxes;
-                    collabWakeupCause = normalizeWakeupCause(waitResult.message(), waitResult.timedOut());
+                    collabWakeupCause = normalizeWakeupCause(aggregatedWaitResult.message(), aggregatedWaitResult.timedOut());
                     collabPrompt = "wait_agent";
+                    terminalFinalAnswerHolder[0] = action.completeWhenDone() ? directFinalAnswer(aggregatedWaitResult) : null;
                     yield objectMapper.writeValueAsString(response);
                 }
                 case RESUME_AGENT -> {
                     AgentControl agentControl = requireAgentControl();
                     ThreadId agentThreadId = resolveAgentThreadId(agentControl, threadId, action.threadId());
+                    if (isCurrentThreadAgentTarget(threadId, agentThreadId)) {
+                        yield selfTargetCollaborationObservation(
+                                "resume_agent",
+                                threadId,
+                                "A sub-agent cannot resume its own thread. Continue the delegated work locally instead.");
+                    }
                     AgentSummary currentAgent = currentAgentSummary(agentControl, agentThreadId);
                     if (currentAgent != null && isAgentAlreadyWorking(currentAgent.status())) {
                         yield collaborationGuardObservation(
@@ -1361,6 +1420,12 @@ public class SpringAiCodexAgent implements CodexAgent {
                 case CLOSE_AGENT -> {
                     AgentControl agentControl = requireAgentControl();
                     ThreadId agentThreadId = resolveAgentThreadId(agentControl, threadId, action.threadId());
+                    if (isCurrentThreadAgentTarget(threadId, agentThreadId)) {
+                        yield selfTargetCollaborationObservation(
+                                "close_agent",
+                                threadId,
+                                "A sub-agent cannot close its own thread from inside the delegated turn.");
+                    }
                     AgentSummary agentSummary = agentControl.closeAgent(agentThreadId);
                     LinkedHashMap<String, Object> response = new LinkedHashMap<>();
                     response.put("success", true);
@@ -1415,7 +1480,8 @@ public class SpringAiCodexAgent implements CodexAgent {
                 outcome.observation(),
                 outcome.awaitingApproval(),
                 outcome.approvalIds(),
-                extractExecSessionObservation(action.action(), outcome.observation()));
+                extractExecSessionObservation(action.action(), outcome.observation()),
+                terminalFinalAnswerHolder[0]);
     }
 
     PlannerStep parseDecision(String response) {
@@ -1544,7 +1610,9 @@ public class SpringAiCodexAgent implements CodexAgent {
                     + " interrupt=" + action.interrupt() + " (compat)";
             case WAIT_AGENT -> action.action()
                     + " threadIds=" + (action.threadIds().isEmpty() ? "(none)" : action.threadIds())
-                    + " timeoutMillis=" + (action.timeoutMillis() == null ? "(default)" : action.timeoutMillis());
+                    + " timeoutMillis=" + (action.timeoutMillis() == null ? "(default)" : action.timeoutMillis())
+                    + " waitForAll=" + action.waitForAll()
+                    + " completeWhenDone=" + action.completeWhenDone();
             case RESUME_AGENT, CLOSE_AGENT -> action.action() + " threadId=" + blankToPlaceholder(action.threadId());
             case LIST_AGENTS -> action.action()
                     + " threadId=" + blankToPlaceholder(action.threadId())
@@ -1678,6 +1746,15 @@ public class SpringAiCodexAgent implements CodexAgent {
                 if (root.has("timedOut") && root.path("timedOut").asBoolean()) {
                     summary.append(" timedOut=true");
                 }
+                if (root.has("allCompleted")) {
+                    summary.append(" allCompleted=").append(root.path("allCompleted").asBoolean());
+                }
+                if (root.has("pendingThreadIds") && root.path("pendingThreadIds").isArray()) {
+                    summary.append(" pending=").append(root.path("pendingThreadIds").size());
+                }
+                if (root.has("completedThreadIds") && root.path("completedThreadIds").isArray()) {
+                    summary.append(" completed=").append(root.path("completedThreadIds").size());
+                }
                 if (root.has("truncated") && root.path("truncated").asBoolean()) {
                     summary.append(" truncated=true");
                 }
@@ -1768,13 +1845,13 @@ public class SpringAiCodexAgent implements CodexAgent {
                                                              List<TurnItem> items,
                                                              Consumer<TurnItem> itemConsumer) {
         if (action != null && action.action() != ToolAction.RUN_COMMAND && action.action() != ToolAction.EXEC_COMMAND) {
-            return new ActionExecutionOutcome(observation, false, List.of(), null);
+            return new ActionExecutionOutcome(observation, false, List.of(), null, null);
         }
 
         try {
             JsonNode root = objectMapper.readTree(observation);
             if (!(root instanceof ObjectNode objectNode)) {
-                return new ActionExecutionOutcome(observation, false, List.of(), null);
+                return new ActionExecutionOutcome(observation, false, List.of(), null, null);
             }
 
             String decision = objectNode.path("approvalDecision").asText("");
@@ -1797,6 +1874,7 @@ public class SpringAiCodexAgent implements CodexAgent {
                         objectMapper.writeValueAsString(objectNode),
                         true,
                         List.of(request.approvalId().value()),
+                        null,
                         null);
             }
             if (CommandApprovalDecision.BLOCK.name().equals(decision) && !executed) {
@@ -1810,7 +1888,7 @@ public class SpringAiCodexAgent implements CodexAgent {
         catch (Exception ignored) {
             // Keep the original observation if enrichment fails.
         }
-        return new ActionExecutionOutcome(observation, false, List.of(), null);
+        return new ActionExecutionOutcome(observation, false, List.of(), null, null);
     }
 
     private String shortApprovalId(String approvalId) {
@@ -1886,6 +1964,25 @@ public class SpringAiCodexAgent implements CodexAgent {
         }
     }
 
+    private String selfTargetCollaborationObservation(String actionName,
+                                                      ThreadId currentThreadId,
+                                                      String error) {
+        try {
+            LinkedHashMap<String, Object> response = new LinkedHashMap<>();
+            response.put("success", false);
+            response.put("action", actionName);
+            response.put("threadId", currentThreadId == null ? null : currentThreadId.value());
+            response.put("error", error);
+            response.put("recommendedNextAction", "inspect_locally");
+            response.put("shouldWaitAgain", false);
+            response.put("shouldUseFinalAnswer", false);
+            return objectMapper.writeValueAsString(response);
+        }
+        catch (Exception exception) {
+            return createErrorObservation(error);
+        }
+    }
+
     private long effectiveWaitAgentTimeoutMillis(Long requestedTimeoutMillis) {
         if (requestedTimeoutMillis == null || requestedTimeoutMillis < 1L) {
             return DEFAULT_WAIT_AGENT_TIMEOUT_MILLIS;
@@ -1899,9 +1996,109 @@ public class SpringAiCodexAgent implements CodexAgent {
                                                TurnControl turnControl) {
         AgentWaitResult waitResult = agentControl.waitAgent(waitTargets, timeoutMillis);
         while (shouldContinueWaitingForAgentResult(waitResult, turnControl)) {
+            if (turnControl != null && turnControl.hasPendingSteeringInputs()) {
+                return new AgentWaitResult(
+                        waitResult.threadId(),
+                        waitResult.turnId(),
+                        waitResult.previousStatus(),
+                        waitResult.status(),
+                        false,
+                        "User steering received while the sub-agent is still running.",
+                        waitResult.finalAnswer(),
+                        waitResult.mailbox(),
+                        waitResult.completedAt());
+            }
             waitResult = agentControl.waitAgent(waitTargets, timeoutMillis);
         }
         return waitResult;
+    }
+
+    private AggregatedAgentWaitResult waitForAgentResults(AgentControl agentControl,
+                                                          List<ThreadId> waitTargets,
+                                                          long timeoutMillis,
+                                                          TurnControl turnControl,
+                                                          boolean waitForAll) {
+        if (!waitForAll || waitTargets == null || waitTargets.size() <= 1) {
+            AgentWaitResult waitResult = waitForAgentResult(agentControl, waitTargets, timeoutMillis, turnControl);
+            List<CompletedAgentResult> completedResults = isDeliverableWaitResult(waitResult)
+                    ? List.of(completedAgentResult(waitResult))
+                    : List.of();
+            List<ThreadId> pendingThreadIds = (waitTargets == null ? List.<ThreadId>of() : waitTargets).stream()
+                    .filter(threadId -> waitResult == null
+                            || waitResult.threadId() == null
+                            || !waitResult.threadId().equals(threadId)
+                            || isAgentAlreadyWorking(waitResult.status()))
+                    .toList();
+            boolean allCompleted = !waitTargets.isEmpty() && pendingThreadIds.isEmpty();
+            String finalAnswer = hasUsableAgentFinalAnswer(waitResult)
+                    ? waitResult.finalAnswer()
+                    : aggregatedFinalAnswer(completedResults);
+            return new AggregatedAgentWaitResult(
+                    false,
+                    waitTargets == null ? List.of() : List.copyOf(waitTargets),
+                    waitResult,
+                    completedResults,
+                    pendingThreadIds,
+                    allCompleted,
+                    waitResult != null && waitResult.timedOut(),
+                    waitResult == null ? "Wait timed out." : waitResult.message(),
+                    finalAnswer);
+        }
+
+        List<ThreadId> pendingThreadIds = new ArrayList<>(waitTargets);
+        List<CompletedAgentResult> completedResults = new ArrayList<>();
+        AgentWaitResult lastWaitResult = null;
+        long deadlineNanos = System.nanoTime() + (timeoutMillis * 1_000_000L);
+
+        while (!pendingThreadIds.isEmpty()) {
+            long remainingNanos = deadlineNanos - System.nanoTime();
+            if (remainingNanos <= 0L) {
+                break;
+            }
+            long remainingMillis = Math.max(1L, remainingNanos / 1_000_000L);
+            lastWaitResult = waitForAgentResult(agentControl, List.copyOf(pendingThreadIds), remainingMillis, turnControl);
+            if (isDeliverableWaitResult(lastWaitResult) && lastWaitResult.threadId() != null) {
+                ThreadId completedThreadId = lastWaitResult.threadId();
+                pendingThreadIds.removeIf(completedThreadId::equals);
+                completedResults.add(completedAgentResult(lastWaitResult));
+                continue;
+            }
+            if (lastWaitResult == null
+                    || lastWaitResult.timedOut()
+                    || (turnControl != null && turnControl.interruptionRequested())
+                    || (lastWaitResult.message() != null && lastWaitResult.message().contains("User steering received"))) {
+                break;
+            }
+            if (lastWaitResult.threadId() != null && !isAgentAlreadyWorking(lastWaitResult.status())) {
+                pendingThreadIds.removeIf(lastWaitResult.threadId()::equals);
+            }
+        }
+
+        boolean allCompleted = !waitTargets.isEmpty() && pendingThreadIds.isEmpty();
+        boolean timedOut = !allCompleted
+                && (lastWaitResult == null
+                || lastWaitResult.timedOut()
+                || System.nanoTime() >= deadlineNanos);
+        String message;
+        if (allCompleted) {
+            message = "All requested agents completed.";
+        }
+        else if (lastWaitResult != null && lastWaitResult.message() != null && !lastWaitResult.message().isBlank()) {
+            message = lastWaitResult.message();
+        }
+        else {
+            message = timedOut ? "Wait timed out before all requested agents completed." : "Waiting stopped before all requested agents completed.";
+        }
+        return new AggregatedAgentWaitResult(
+                true,
+                List.copyOf(waitTargets),
+                lastWaitResult,
+                List.copyOf(completedResults),
+                List.copyOf(pendingThreadIds),
+                allCompleted,
+                timedOut,
+                message,
+                aggregatedFinalAnswer(completedResults));
     }
 
     private boolean shouldContinueWaitingForAgentResult(AgentWaitResult waitResult,
@@ -1953,6 +2150,10 @@ public class SpringAiCodexAgent implements CodexAgent {
         }
         resolved = matchAgentSelector(trimmedSelector, agentControl.listAgents(null, true));
         return resolved == null ? new ThreadId(trimmedSelector) : resolved;
+    }
+
+    private boolean isCurrentThreadAgentTarget(ThreadId currentThreadId, ThreadId targetThreadId) {
+        return currentThreadId != null && targetThreadId != null && currentThreadId.equals(targetThreadId);
     }
 
     private ThreadId matchAgentSelector(String selector, List<AgentSummary> agents) {
@@ -2012,14 +2213,102 @@ public class SpringAiCodexAgent implements CodexAgent {
                 && !waitResult.finalAnswer().isBlank();
     }
 
-    private String recommendedWaitAgentNextAction(AgentWaitResult waitResult) {
-        if (hasUsableAgentFinalAnswer(waitResult)) {
+    private boolean shouldUseFinalAnswerAfterAggregatedResult(AggregatedAgentWaitResult aggregatedWaitResult) {
+        if (aggregatedWaitResult == null || aggregatedWaitResult.finalAnswer() == null || aggregatedWaitResult.finalAnswer().isBlank()) {
+            return false;
+        }
+        if (!aggregatedWaitResult.waitForAllRequested()) {
+            return true;
+        }
+        return directFinalAnswer(aggregatedWaitResult) != null;
+    }
+
+    private boolean shouldWaitAgainAfterAggregatedResult(AggregatedAgentWaitResult aggregatedWaitResult) {
+        return aggregatedWaitResult != null
+                && !aggregatedWaitResult.allCompleted()
+                && !aggregatedWaitResult.timedOut()
+                && !isSteeringWakeMessage(aggregatedWaitResult.message())
+                && !aggregatedWaitResult.pendingThreadIds().isEmpty();
+    }
+
+    private String recommendedWaitAgentNextAction(AggregatedAgentWaitResult aggregatedWaitResult) {
+        if (aggregatedWaitResult == null) {
+            return "inspect_status";
+        }
+        if (shouldUseFinalAnswerAfterAggregatedResult(aggregatedWaitResult)) {
             return "use_final_answer";
         }
-        if (waitResult != null && waitResult.timedOut() && isAgentAlreadyWorking(waitResult.status())) {
+        if (shouldWaitAgainAfterAggregatedResult(aggregatedWaitResult)) {
             return "wait_agent";
         }
+        if (aggregatedWaitResult.allCompleted()) {
+            return "continue";
+        }
         return "inspect_status";
+    }
+
+    private boolean isDeliverableWaitResult(AgentWaitResult waitResult) {
+        return waitResult != null
+                && waitResult.threadId() != null
+                && !isAgentAlreadyWorking(waitResult.status());
+    }
+
+    private CompletedAgentResult completedAgentResult(AgentWaitResult waitResult) {
+        return new CompletedAgentResult(
+                waitResult.threadId(),
+                waitResult.turnId(),
+                waitResult.previousStatus(),
+                waitResult.status(),
+                waitResult.finalAnswer(),
+                waitResult.mailbox(),
+                waitResult.completedAt());
+    }
+
+    private Map<String, Object> serializeCompletedAgentResult(CompletedAgentResult result) {
+        LinkedHashMap<String, Object> serialized = new LinkedHashMap<>();
+        serialized.put("threadId", result.threadId() == null ? null : result.threadId().value());
+        serialized.put("turnId", result.turnId() == null ? null : result.turnId().value());
+        serialized.put("previousStatus", result.previousStatus());
+        serialized.put("status", result.status());
+        serialized.put("finalAnswer", result.finalAnswer());
+        serialized.put("mailbox", result.mailbox());
+        serialized.put("completedAt", result.completedAt());
+        return serialized;
+    }
+
+    private String aggregatedFinalAnswer(List<CompletedAgentResult> completedResults) {
+        if (completedResults == null || completedResults.isEmpty()) {
+            return "";
+        }
+        List<CompletedAgentResult> usableResults = completedResults.stream()
+                .filter(result -> result != null && result.finalAnswer() != null && !result.finalAnswer().isBlank())
+                .toList();
+        if (usableResults.isEmpty()) {
+            return "";
+        }
+        if (usableResults.size() == 1) {
+            return usableResults.get(0).finalAnswer();
+        }
+        return usableResults.stream()
+                .map(result -> blankToPlaceholder(result.threadId() == null ? null : result.threadId().value()) + ": " + result.finalAnswer())
+                .collect(Collectors.joining(System.lineSeparator() + System.lineSeparator()));
+    }
+
+    private String directFinalAnswer(AggregatedAgentWaitResult aggregatedWaitResult) {
+        if (aggregatedWaitResult == null || !aggregatedWaitResult.allCompleted()) {
+            return null;
+        }
+        List<CompletedAgentResult> usableResults = aggregatedWaitResult.completedResults().stream()
+                .filter(result -> result != null && result.finalAnswer() != null && !result.finalAnswer().isBlank())
+                .toList();
+        if (usableResults.size() != 1) {
+            return null;
+        }
+        return usableResults.get(0).finalAnswer();
+    }
+
+    private boolean isSteeringWakeMessage(String message) {
+        return message != null && message.contains("User steering received");
     }
 
     private String summarizeEditPlan(EditPlan editPlan) {
@@ -2267,6 +2556,10 @@ public class SpringAiCodexAgent implements CodexAgent {
                     actionNode != null && actionNode.path("recursive").asBoolean(false),
                     firstNonNullInteger(parseInteger(actionNode.get("maxResults")), parseInteger(actionNode.get("max_results"))),
                     firstNonNullLong(parseLong(actionNode.get("timeoutMillis")), parseLong(actionNode.get("timeout_millis"))),
+                    firstTrue(actionNode != null && actionNode.path("waitForAll").asBoolean(false),
+                            actionNode != null && actionNode.path("wait_for_all").asBoolean(false)),
+                    firstTrue(actionNode != null && actionNode.path("completeWhenDone").asBoolean(false),
+                            actionNode != null && actionNode.path("complete_when_done").asBoolean(false)),
                     firstNonNullLong(parseLong(actionNode.get("yieldTimeMillis")), parseLong(actionNode.get("yield_time_ms"))),
                     firstNonNullLong(parseLong(actionNode.get("maxRuntimeMillis")), parseLong(actionNode.get("max_runtime_ms"))),
                     actionNode != null && actionNode.path("pty").asBoolean(false),
@@ -2450,6 +2743,10 @@ public class SpringAiCodexAgent implements CodexAgent {
         return first != null ? first : second;
     }
 
+    private boolean firstTrue(boolean first, boolean second) {
+        return first || second;
+    }
+
     private Integer firstNonNullInteger(Integer first, Integer second) {
         return first != null ? first : second;
     }
@@ -2533,10 +2830,32 @@ public class SpringAiCodexAgent implements CodexAgent {
                              boolean recursive,
                              Integer maxResults,
                              Long timeoutMillis,
+                             boolean waitForAll,
+                             boolean completeWhenDone,
                              Long yieldTimeMillis,
                              Long maxRuntimeMillis,
                              boolean pty,
                              boolean interrupt) {
+    }
+
+    private record CompletedAgentResult(ThreadId threadId,
+                                        TurnId turnId,
+                                        AgentStatus previousStatus,
+                                        AgentStatus status,
+                                        String finalAnswer,
+                                        AgentMailboxState mailbox,
+                                        Instant completedAt) {
+    }
+
+    private record AggregatedAgentWaitResult(boolean waitForAllRequested,
+                                             List<ThreadId> requestedThreadIds,
+                                             AgentWaitResult primaryResult,
+                                             List<CompletedAgentResult> completedResults,
+                                             List<ThreadId> pendingThreadIds,
+                                             boolean allCompleted,
+                                             boolean timedOut,
+                                             String message,
+                                             String finalAnswer) {
     }
 
     record PlannerStep(String summary,
@@ -2583,7 +2902,8 @@ public class SpringAiCodexAgent implements CodexAgent {
     record BatchExecutionOutcome(String observation,
                                  boolean awaitingApproval,
                                  List<String> approvalIds,
-                                 List<ExecSessionObservation> execSessionObservations) {
+                                 List<ExecSessionObservation> execSessionObservations,
+                                 String terminalFinalAnswer) {
     }
 
     private record ParallelActionExecution(int index,
@@ -2595,7 +2915,8 @@ public class SpringAiCodexAgent implements CodexAgent {
     private record ActionExecutionOutcome(String observation,
                                           boolean awaitingApproval,
                                           List<String> approvalIds,
-                                          ExecSessionObservation execSessionObservation) {
+                                          ExecSessionObservation execSessionObservation,
+                                          String terminalFinalAnswer) {
     }
 
     private record ExecSessionObservation(String sessionId,

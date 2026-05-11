@@ -9,6 +9,8 @@ import org.dean.codex.protocol.appserver.CommandExecParams;
 import org.dean.codex.protocol.appserver.CommandExecResizeParams;
 import org.dean.codex.protocol.appserver.CommandExecTerminateParams;
 import org.dean.codex.protocol.appserver.CommandExecWriteParams;
+import org.dean.codex.protocol.appserver.ConfigGetParams;
+import org.dean.codex.protocol.appserver.ConfigUpdateParams;
 import org.dean.codex.protocol.appserver.InitializeParams;
 import org.dean.codex.protocol.appserver.InitializedNotification;
 import org.dean.codex.protocol.appserver.AgentCloseParams;
@@ -27,6 +29,7 @@ import org.dean.codex.protocol.appserver.AgentSpawnParams;
 import org.dean.codex.protocol.appserver.AgentSpawnResponse;
 import org.dean.codex.protocol.appserver.AgentWaitParams;
 import org.dean.codex.protocol.appserver.AgentWaitResponse;
+import org.dean.codex.protocol.appserver.ModelListParams;
 import org.dean.codex.protocol.appserver.SkillsListParams;
 import org.dean.codex.protocol.appserver.ThreadArchiveParams;
 import org.dean.codex.protocol.appserver.ThreadBackgroundTerminalsCleanParams;
@@ -181,6 +184,9 @@ public class JsonRpcAppServerConnection implements AutoCloseable {
             case "turn/interrupt" -> session.turnInterrupt(readParams(message.params(), TurnInterruptParams.class));
             case "turn/steer" -> session.turnSteer(readParams(message.params(), TurnSteerParams.class));
             case "skills/list" -> session.skillsList(readParams(message.params(), SkillsListParams.class));
+            case "model/list" -> session.modelList(readParams(message.params(), ModelListParams.class));
+            case "config/get" -> session.configGet(readParams(message.params(), ConfigGetParams.class));
+            case "config/update" -> session.configUpdate(readParams(message.params(), ConfigUpdateParams.class));
             default -> throw new NoSuchMethodException("Method not found: " + message.method());
         };
     }
